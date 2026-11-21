@@ -21,8 +21,8 @@
 | --- | --- |
 | `SELECT * FROM t WHERE id = 1` | `sql` |
 | `UPDATE t SET a = 1 WHERE id = 1` | `sql`（仍需 `confirm_write`） |
-| `最近7天每天开了多少盒` | `nl` |
-| `帮我查一下 orders` | `nl` |
+| `最近7天每天的销量` | `nl` |
+| `帮我查一下 order_items` | `nl` |
 
 > 中文占多数的输入一般都会进入 NL 模式；如果想要确定性，建议显式传 `mode`。
 
@@ -30,9 +30,9 @@
 
 ```json
 {
-  "input": "最近7天每天开了多少盒",
+  "input": "最近7天每天的销量",
   "mode": "nl",
-  "datasource": "datav",
+  "datasource": "sales",
   "output": "json",
   "max_rows": 100,
   "timeout_seconds": 30,
@@ -93,17 +93,17 @@
 # SQL + JSON
 curl -s -X POST $API/v1/query \
   -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
-  -d '{"input":"SELECT * FROM purchases","mode":"sql","max_rows":5}'
+  -d '{"input":"SELECT * FROM orders","mode":"sql","max_rows":5}'
 
 # SQL + markdown
 curl -s -X POST $API/v1/query \
   -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
-  -d '{"input":"SELECT * FROM purchases","mode":"sql","output":"markdown","max_rows":5}'
+  -d '{"input":"SELECT * FROM orders","mode":"sql","output":"markdown","max_rows":5}'
 
 # NL
 curl -s -X POST $API/v1/query \
   -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
-  -d '{"input":"真人用户最近一周的购买次数","mode":"nl","datasource":"blindbox"}'
+  -d '{"input":"活跃用户最近一周的下单次数","mode":"nl","datasource":"analytics"}'
 ```
 
 SQL 被拦截或改写时会发生什么，见 [SQL 安全策略](/guide/sql-policy)；NL 的生成、剪枝与修复细节见 [NL2SQL 工作原理](/guide/nl2sql)。

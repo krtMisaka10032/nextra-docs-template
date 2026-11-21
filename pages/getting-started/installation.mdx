@@ -37,11 +37,11 @@ cp config.example.yaml config.yaml
 api_key: "换成强随机值"
 
 datasources:
-  - name: datav
+  - name: sales
     host: 127.0.0.1
     port: 5432
-    database: datav
-    user: postgres
+    database: sales
+    user: demo_user
 ```
 
 完整字段见[配置详解](/getting-started/configuration)。
@@ -76,7 +76,7 @@ curl -s http://127.0.0.1:8731/healthz
 正常返回：
 
 ```json
-{"status":"ok","datasources":{"datav":"ok","blindbox":"ok"}}
+{"status":"ok","datasources":{"sales":"ok","analytics":"ok"}}
 ```
 
 如果有数据源不可达，`status` 为 `degraded`，对应数据源为 `down`。
@@ -92,7 +92,7 @@ curl -s http://127.0.0.1:8731/healthz
 启动日志出现下面这行即表示就绪：
 
 ```text
-nl2sql-proxy 就绪：datasources=['datav', 'blindbox'] mcp=True
+nl2sql-proxy 就绪：datasources=['sales', 'analytics'] mcp=True
 ```
 
 ## 使用 systemd 托管

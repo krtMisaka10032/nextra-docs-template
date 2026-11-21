@@ -2,6 +2,8 @@
 
 MCP 端点：`http://127.0.0.1:8731/mcp`（streamable-http，stateless）。所有工具共用与 HTTP API 相同的 `X-API-Key` 鉴权。
 
+> 本文示例中的数据源、库名、表名、账号均为 mock，仅用于演示。
+
 ## run_sql
 
 直接执行一条 SQL，遵守与 HTTP API 完全相同的安全策略。
@@ -45,9 +47,9 @@ MCP 端点：`http://127.0.0.1:8731/mcp`（streamable-http，stateless）。所�
 返回示例：
 
 ```text
-数据源 datav 共 12 张表/视图：
-- blind_box_rate（约120行，6列） —— 盲盒概率配置
-- v_xindong_base_daily（约365行，12列） —— 按日基础汇总
+数据源 sales 共 12 张表/视图：
+- product_prices（约120行，6列） —— 商品价格配置
+- v_daily_sales（约365行，12列） —— 按日销售汇总
 ```
 
 ## describe_table
@@ -64,14 +66,14 @@ MCP 端点：`http://127.0.0.1:8731/mcp`（streamable-http，stateless）。所�
 ```json
 {
  "schema": "public",
- "name": "blind_box_rate",
- "comment": "盲盒概率配置",
+ "name": "product_prices",
+ "comment": "商品价格配置",
  "est_rows": 120,
  "column_count": 6,
  "columns": [
   {"name": "id", "type": "integer", "nullable": false, "default": "...", "comment": null, "is_pk": true}
  ],
- "foreign_keys": [{"column": "sku_id", "ref_table": "blind_box_sku", "ref_column": "id"}]
+ "foreign_keys": [{"column": "product_id", "ref_table": "products", "ref_column": "id"}]
 }
 ```
 
@@ -82,9 +84,9 @@ MCP 端点：`http://127.0.0.1:8731/mcp`（streamable-http，stateless）。所�
 Python：
 
 ```python
-await session.call_tool("list_tables", {"datasource": "datav"})
-await session.call_tool("describe_table", {"table": "blind_box_rate", "datasource": "datav"})
-await session.call_tool("ask_db", {"question": "最近7天每天开了多少盒", "datasource": "datav"})
+await session.call_tool("list_tables", {"datasource": "sales"})
+await session.call_tool("describe_table", {"table": "product_prices", "datasource": "sales"})
+await session.call_tool("ask_db", {"question": "最近7天每天的销量", "datasource": "sales"})
 await session.call_tool("run_sql", {
     "sql": "UPDATE orders SET status = 'done' WHERE id = 42",
     "confirm_write": True
@@ -94,7 +96,7 @@ await session.call_tool("run_sql", {
 Claude Code 中直接用自然语言描述即可，例如：
 
 ```text
-先 list_tables 看一下 datav 库，然后用 ask_db 查询最近 7 天每天盒数
+先 list_tables 看一下 sales 库，然后用 ask_db 查询最近 7 天每天的销量
 ```
 
 ## 返回格式

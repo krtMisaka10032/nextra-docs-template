@@ -2,6 +2,8 @@
 
 服务会从 PostgreSQL 系统目录内省表结构，供 NL2SQL 提示词和 schema 查询接口使用。你不需要手动维护建表信息。
 
+> 本章示例中的库名、表名、字段名均为 mock，仅用于演示。
+
 ## 内省内容
 
 对每个数据源，读取除 `pg_catalog`、`information_schema` 之外的模式，对象类型包括：
@@ -35,25 +37,25 @@
 ### 列出所有表
 
 ```bash
-curl -s "$API/v1/schema?datasource=datav" -H "X-API-Key: $KEY"
+curl -s "$API/v1/schema?datasource=sales" -H "X-API-Key: $KEY"
 ```
 
 ```json
 {
-  "datasource": "datav",
+  "datasource": "sales",
   "table_count": 2,
   "tables": [
     {
       "schema": "public",
-      "name": "blind_box_rate",
-      "comment": "盲盒概率配置",
+      "name": "product_prices",
+      "comment": "商品价格配置",
       "est_rows": 120,
       "column_count": 6
     },
     {
       "schema": "public",
-      "name": "v_xindong_base_daily",
-      "comment": "按日基础汇总",
+      "name": "v_daily_sales",
+      "comment": "按日销售汇总",
       "est_rows": 365,
       "column_count": 12
     }
@@ -69,16 +71,16 @@ curl -s "$API/v1/schema?datasource=datav" -H "X-API-Key: $KEY"
 ### 查看单表详情
 
 ```bash
-curl -s "$API/v1/schema/blind_box_rate?datasource=datav" \
+curl -s "$API/v1/schema/product_prices?datasource=sales" \
   -H "X-API-Key: $KEY"
 ```
 
 ```json
 {
-  "datasource": "datav",
+  "datasource": "sales",
   "schema": "public",
-  "name": "blind_box_rate",
-  "comment": "盲盒概率配置",
+  "name": "product_prices",
+  "comment": "商品价格配置",
   "est_rows": 120,
   "column_count": 6,
   "columns": [
@@ -86,13 +88,13 @@ curl -s "$API/v1/schema/blind_box_rate?datasource=datav" \
       "name": "id",
       "type": "integer",
       "nullable": false,
-      "default": "nextval('blind_box_rate_id_seq'::regclass)",
+      "default": "nextval('product_prices_id_seq'::regclass)",
       "comment": null,
       "is_pk": true
     }
   ],
   "foreign_keys": [
-    {"column": "sku_id", "ref_table": "blind_box_sku", "ref_column": "id"}
+    {"column": "product_id", "ref_table": "products", "ref_column": "id"}
   ]
 }
 ```
@@ -114,10 +116,10 @@ curl -s "$API/v1/schema/blind_box_rate?datasource=datav" \
 
 ```yaml
 schema_overrides:
-  datav:
+  sales:
     tables:
-      gifts:
-        desc: "礼物流水底表（700万行级），分析优先用各 v_* 汇总视图"
+      order_items_raw:
+        desc: "订单明细底表（百万行级），分析优先用各 v_* 汇总视图"
 ```
 
 这段描述会同时出现在：

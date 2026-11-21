@@ -16,7 +16,7 @@ curl -s $API/healthz
 ```
 
 ```json
-{"status":"ok","datasources":{"datav":"ok","blindbox":"ok"}}
+{"status":"ok","datasources":{"sales":"ok","analytics":"ok"}}
 ```
 
 ## 2. 直接执行 SQL
@@ -25,9 +25,9 @@ curl -s $API/healthz
 curl -s -X POST $API/v1/query \
   -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
   -d '{
-    "input": "SELECT * FROM blind_box_sku",
+    "input": "SELECT * FROM products",
     "mode": "sql",
-    "datasource": "datav",
+    "datasource": "sales",
     "output": "markdown",
     "max_rows": 3
   }'
@@ -41,7 +41,7 @@ curl -s -X POST $API/v1/query \
 ```json
 {
   "success": true,
-  "sql": "SELECT * FROM blind_box_sku LIMIT 3",
+  "sql": "SELECT * FROM products LIMIT 3",
   "columns": ["id", "name"],
   "rows": [[1, "基础款"], [2, "进阶款"], [3, "稀有款"]],
   "row_count": 3,
@@ -55,7 +55,7 @@ curl -s -X POST $API/v1/query \
 ```bash
 curl -s -X POST $API/v1/query \
   -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
-  -d '{"input": "最近7天每天开了多少盒", "mode": "nl", "datasource": "datav"}'
+  -d '{"input": "最近7天每天的销量", "mode": "nl", "datasource": "sales"}'
 ```
 
 NL 模式会返回结果、最终执行的 SQL，以及模型对模糊口径的假设：
@@ -63,8 +63,8 @@ NL 模式会返回结果、最终执行的 SQL，以及模型对模糊口径的�
 ```json
 {
   "success": true,
-  "sql": "SELECT d AS 日期, boxes AS 盒数 FROM v_xindong_base_daily ORDER BY d DESC LIMIT 7",
-  "columns": ["日期", "盒数"],
+  "sql": "SELECT d AS 日期, units AS 销量 FROM v_daily_sales ORDER BY d DESC LIMIT 7",
+  "columns": ["日期", "销量"],
   "rows": [["2026-11-20", 1321]],
   "row_count": 1,
   "nl_meta": {
@@ -101,8 +101,9 @@ curl -s -X POST $API/v1/query \
 curl -s -X POST $API/v1/query \
   -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
   -d '{
-    "input": "SELECT * FROM purchases WHERE human = true",
+    "input": "SELECT * FROM orders WHERE is_active = true",
     "mode": "sql",
+    "datasource": "analytics",
     "dry_run": true
   }'
 ```
@@ -113,16 +114,16 @@ curl -s -X POST $API/v1/query \
 
 ```bash
 # 所有表/视图（含注释、行数估算）
-curl -s "$API/v1/schema?datasource=datav" -H "X-API-Key: $KEY"
+curl -s "$API/v1/schema?datasource=sales" -H "X-API-Key: $KEY"
 
 # 单表详情（列、类型、主键、外键、注释）
-curl -s "$API/v1/schema/blind_box_rate?datasource=datav" -H "X-API-Key: $KEY"
+curl -s "$API/v1/schema/product_prices?datasource=sales" -H "X-API-Key: $KEY"
 ```
 
 schema 结果缓存 10 分钟；DDL 变更后可加 `refresh=1` 强制刷新：
 
 ```bash
-curl -s "$API/v1/schema?datasource=datav&refresh=1" -H "X-API-Key: $KEY"
+curl -s "$API/v1/schema?datasource=sales&refresh=1" -H "X-API-Key: $KEY"
 ```
 
 ## 7. 让 Agent 通过 MCP 使用
@@ -140,7 +141,7 @@ claude mcp add --transport http nl2sql \
 接入后，Agent 查询数据库就是一次工具调用：
 
 ```text
-ask_db(question="最近7天每天开了多少盒", datasource="datav")
+ask_db(question="最近7天每天的销量", datasource="sales")
 ```
 
 更多客户端配置见 [MCP 接入](/guide/mcp)，工具参数见 [MCP 工具](/api-reference/mcp-tools)。

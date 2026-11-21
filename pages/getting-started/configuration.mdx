@@ -18,6 +18,8 @@
 
 ## 完整示例
 
+以下名称均为示例占位符，请替换为你自己的环境。
+
 ```yaml
 server:
   host: 127.0.0.1        # 只监听本机；对外请走 nginx 反代 / SSH 隧道并加 TLS
@@ -27,18 +29,18 @@ server:
 api_key: "changeme"      # 生产务必换成强随机值
 
 datasources:
-  - name: datav
+  - name: sales
     host: 127.0.0.1
     port: 5432
-    database: datav
-    user: postgres       # 本机 pg_hba 为 trust 时可省略 password
+    database: sales
+    user: demo_user      # 示例账号；生产请使用最小权限账号
     pool: { min_size: 1, max_size: 5 }
     statement_timeout_ms: 60000
-  - name: blindbox
+  - name: analytics
     host: 127.0.0.1
     port: 5432
-    database: blindbox
-    user: postgres
+    database: analytics
+    user: demo_user
     pool: { min_size: 1, max_size: 3 }
     statement_timeout_ms: 60000
 
@@ -76,11 +78,11 @@ glossary_file: glossary.yaml
 fewshot_file: fewshots.yaml
 
 schema_overrides:
-  datav:
+  sales:
     tables:
-      gifts:
-        desc: "礼物流水底表（700万行级），分析优先用各 v_* 汇总视图"
-  blindbox:
+      order_items_raw:
+        desc: "订单明细底表（百万行级），分析优先用各 v_* 汇总视图"
+  analytics:
     tables: {}
 ```
 
@@ -110,7 +112,7 @@ schema_overrides:
 | `host` | `127.0.0.1` | 数据库地址 |
 | `port` | `5432` | 数据库端口 |
 | `database` | 必填 | 数据库名 |
-| `user` | `postgres` | 连接用户 |
+| `user` | 示例 `demo_user` | 连接用户；生产请显式指定最小权限账号 |
 | `password` | 空 | 密码；本机 `pg_hba` 为 trust 时可省略 |
 | `pool.min_size` | `1` | 连接池最小连接数 |
 | `pool.max_size` | `5` | 连接池最大连接数 |

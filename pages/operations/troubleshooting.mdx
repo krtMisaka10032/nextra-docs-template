@@ -90,7 +90,7 @@ min(请求 timeout_seconds, 数据源 statement_timeout_ms)
    - 表/列不存在 → 检查剪枝是否漏表，补充 `schema_overrides` 或 few-shot
    - 口径不对 → 补充 `glossary.yaml`
    - 语法/函数问题 → 补充正确示例
-3. 强刷 schema：`curl "$API/v1/schema?datasource=datav&refresh=1" -H "X-API-Key: $KEY"`
+3. 强刷 schema：`curl "$API/v1/schema?datasource=sales&refresh=1" -H "X-API-Key: $KEY"`
 4. 该问题口径固定时，直接用 `mode=sql` 固化 SQL
 
 ## MCP 连接失败

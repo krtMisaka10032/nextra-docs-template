@@ -34,12 +34,12 @@ curl -s $API/healthz
 # 2. 自然语言问数
 curl -s -X POST $API/v1/query \
   -H 'X-API-Key: YOUR_KEY' -H 'Content-Type: application/json' \
-  -d '{"input":"最近7天每天开了多少盒","mode":"nl","datasource":"datav"}'
+  -d '{"input":"最近7天每天的销量","mode":"nl","datasource":"sales"}'
 
 # 3. 直接执行 SQL，返回 markdown 表格
 curl -s -X POST $API/v1/query \
   -H 'X-API-Key: YOUR_KEY' -H 'Content-Type: application/json' \
-  -d '{"input":"SELECT * FROM purchases","mode":"sql","output":"markdown","max_rows":5}'
+  -d '{"input":"SELECT * FROM orders","mode":"sql","output":"markdown","max_rows":5}'
 ```
 
 ## 手册导航

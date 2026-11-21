@@ -2,6 +2,8 @@
 
 nl2sql-proxy 的目标是“**不允许外部直连数据库，所有操作经由本服务的单一接口**”。安全能力是分层的，单层被绕过时仍有下一层兜底，但每一层都有明确边界。
 
+> 本文中的库名、账号均为 mock，仅用于演示。
+
 ## 分层防护
 
 | 层 | 机制 | 边界 |
@@ -37,12 +39,12 @@ NL 模式不允许任何写操作，因此 `confirm_write` 在 NL 模式下没�
 
 ## 数据库账号（重要）
 
-示例配置使用 `postgres` 并以本机 trust 认证连接，这等价于**代理进程拥有数据库上帝权限**。生产环境应改为最小权限账号：
+示例配置可能使用高权限账号（例如数据库管理员）并以本机 trust 认证连接，这等价于**代理进程拥有数据库上帝权限**。生产环境应改为最小权限账号：
 
 ```sql
 -- 只读分析角色示例
 CREATE ROLE nl2sql_ro LOGIN PASSWORD '强随机密码';
-GRANT CONNECT ON DATABASE datav TO nl2sql_ro;
+GRANT CONNECT ON DATABASE sales TO nl2sql_ro;
 GRANT USAGE ON SCHEMA public TO nl2sql_ro;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO nl2sql_ro;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
@@ -51,17 +53,17 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
 
 - 需要写能力时，单独授权具体表的具体操作，不要授予全库写权限
 - `ALTER DEFAULT PRIVILEGES` 需由对象所有者执行，或调整授权方式
-- 修改后更新 `datasources[].user` / `password`
+- 修改后更新 `datasources[].user` / `password`（示例中为 `demo_user`）
 
 ## 遗留风险：PostgreSQL 对外暴露
 
-项目说明中记录了一个已知风险：本机 `pg_hba.conf` 存在类似
+项目说明中记录了一个已知风险：`pg_hba.conf` 可能存在类似
 
 ```text
-host datav datav 0.0.0.0/0 md5
+host sales sales 0.0.0.0/0 md5
 ```
 
-的规则，意味着 `datav` 库对全网开放了密码爆破面，与“禁止外部直连”的目标冲突。
+的规则，意味着业务库对全网开放了密码爆破面，与“禁止外部直连”的目标冲突。
 
 处理建议：
 

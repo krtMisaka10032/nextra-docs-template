@@ -2,24 +2,26 @@
 
 NL2SQL 的准确率很大程度上取决于三份业务知识：术语表、few-shot 样例、表描述覆盖。它们都是普通 YAML/配置，改完重启服务即可生效。
 
+> 本章示例中的数据源、表名、字段名均为 mock，仅用于演示格式。
+
 ## 业务术语表 `glossary.yaml`
 
 按数据源分组，每个条目包含术语、含义和对应的字段/视图。
 
 ```yaml
-datav:
-  - term: 开盒/盒数
-    meaning: 1 盒必出 1 件奖品，盒数=奖品件数
-    maps_to: "v_gift_purchase.qty；按日用 v_xindong_base_daily.boxes"
+sales:
+  - term: 订单/件数
+    meaning: 1 个订单行对应 1 件商品，件数=商品数量
+    maps_to: "v_order_items.quantity；按日用 v_daily_sales.units"
   - term: 成本
-    meaning: 开盒花费 = 盒数 × 150 电池/盒
-    maps_to: "v_gift_purchase.cost_battery"
+    meaning: 下单花费 = 件数 × 单价
+    maps_to: "v_order_items.cost_points"
 ```
 
 注入提示词后的形式：
 
 ```text
-- "开盒/盒数": 1 盒必出 1 件奖品，盒数=奖品件数（对应：v_gift_purchase.qty；按日用 v_xindong_base_daily.boxes）
+- "订单/件数": 1 个订单行对应 1 件商品，件数=商品数量（对应：v_order_items.quantity；按日用 v_daily_sales.units）
 ```
 
 编写建议：
@@ -34,13 +36,13 @@ datav:
 按数据源分组，每条是“问题 → SQL”，可选 `note` 说明口径：
 
 ```yaml
-datav:
-  - q: "最近7天每天开了多少盒"
-    sql: "SELECT d AS 日期, boxes AS 盒数 FROM v_xindong_base_daily ORDER BY d DESC LIMIT 7"
-    note: "按日盒数直接取汇总视图，口径=审计窗口内基础态"
-  - q: "城堡爆率最高的前5个房间"
-    sql: "SELECT room_id, anchor_name AS 主播, castle_pct AS 城堡爆率, boxes AS 盒数 FROM v_xindong_base_room ORDER BY castle_pct DESC LIMIT 5"
-    note: "爆率已是百分比数值，直接排序"
+sales:
+  - q: "最近7天每天的销量"
+    sql: "SELECT d AS 日期, units AS 销量 FROM v_daily_sales ORDER BY d DESC LIMIT 7"
+    note: "按日销量直接取汇总视图，口径=报表窗口内基础态"
+  - q: "稀有率最高的前5个渠道"
+    sql: "SELECT channel_id, channel_name AS 渠道, premium_pct AS 稀有率, units AS 销量 FROM v_daily_channel ORDER BY premium_pct DESC LIMIT 5"
+    note: "稀有率已是百分比数值，直接排序"
 ```
 
 工作方式：
@@ -67,13 +69,13 @@ datav:
 
 ```yaml
 schema_overrides:
-  datav:
+  sales:
     tables:
-      gifts:
-        desc: "礼物流水底表（700万行级），分析优先用各 v_* 汇总视图"
+      order_items_raw:
+        desc: "订单明细底表（百万行级），分析优先用各 v_* 汇总视图"
         columns:
-          castle_raw: "城堡原始计数（未封顶）"
-  blindbox:
+          premium_raw: "稀有商品原始计数（未封顶）"
+  analytics:
     tables: {}
 ```
 
@@ -88,7 +90,7 @@ schema_overrides:
 
    | 现象 | 处理 |
    | --- | --- |
-   | 口径理解错误（“盒数”“真人”“成本”等） | 补 `glossary.yaml` |
+   | 口径理解错误（“件数”“活跃用户”“成本”等） | 补 `glossary.yaml` |
    | 选错表/视图，或漏掉关键列 | 补 `schema_overrides`，或把正确写法加入 `fewshots.yaml` |
    | SQL 聚合/排序/时间处理写错 | 加入 `fewshots.yaml` |
    | 表太多导致剪枝遗漏 | 提高 `nl2sql.top_k_tables`，或给表补描述 |

@@ -70,17 +70,17 @@ sqlite3 data/audit.db \
 ## 典型记录
 
 ```text
-ts                    api_key_hint  datasource  mode  status        error_code
-2026-11-21 23:10:01   abcd…1f2e3d4c  datav      nl    ok
-2026-11-21 23:10:15   abcd…1f2e3d4c  datav      sql   policy_violation  POLICY_UNFILTERED_WRITE
-2026-11-21 23:11:02   abcd…1f2e3d4c  blindbox  sql   ok
-2026-11-21 23:11:40   abcd…1f2e3d4c  datav      nl    nl_error      NL_REPAIR_EXHAUSTED
+ts                    api_key_hint  datasource  mode  status            error_code
+2026-11-21 23:10:01   abcd…1f2e3d4c  sales       nl    ok
+2026-11-21 23:10:15   abcd…1f2e3d4c  sales       sql   policy_violation  POLICY_UNFILTERED_WRITE
+2026-11-21 23:11:02   abcd…1f2e3d4c  analytics   sql   ok
+2026-11-21 23:11:40   abcd…1f2e3d4c  sales       nl    nl_error          NL_REPAIR_EXHAUSTED
 ```
 
 数据库失败时 `error_code` 是 SQLSTATE：
 
 ```text
-2026-11-21 23:12:03   abcd…1f2e3d4c  datav  sql  db_error  42P01
+2026-11-21 23:12:03   abcd…1f2e3d4c  sales  sql  db_error  42P01
 ```
 
 ## 运维建议

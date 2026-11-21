@@ -1,0 +1,121 @@
+# SQL 安全策略
+
+所有 SQL（包括 NL 生成的 SQL）都会经过 sqlglot 策略引擎。它负责三件事：**分类语句、拦截危险操作、做安全改写**。
+
+## 允许的语句
+
+| 语句 | 是否允许 | 额外要求 |
+| --- | --- | --- |
+| 单条 `SELECT`（含 `UNION`、只读 CTE） | 允许 | 自动加/钳制 LIMIT |
+| `INSERT` / `UPDATE` / `DELETE` | 允许 | 必须 `confirm_write=true`，且 `UPDATE/DELETE` 必须有 `WHERE` |
+| `CREATE` / `DROP` / `ALTER` / `TRUNCATE` | 允许 | 必须 `confirm_write=true` |
+| 多条语句 | 拒绝 | 一次只能执行一条 |
+| `BEGIN` / `COMMIT` / `ROLLBACK` | 拒绝 | 事务由代理管理 |
+| `SET` / `VACUUM` / `GRANT` / `COPY` 等未建模命令 | 拒绝 | 不在支持范围内 |
+
+写操作（包括 DDL）都视为危险操作，需要请求级二次确认；NL 模式则完全禁止写操作。
+
+## 拦截规则
+
+| 规则 | 错误码 | 说明 |
+| --- | --- | --- |
+| 多语句 | `POLICY_MULTIPLE_STATEMENTS` | `SELECT 1; DROP TABLE x` 会被整体拒绝；字符串字面量里的分号不算 |
+| 事务语句 | `POLICY_UNSUPPORTED` | `BEGIN` / `COMMIT` / `ROLLBACK` 不允许显式提交 |
+| 不支持的命令 | `POLICY_UNSUPPORTED` | `SET` / `VACUUM` / `GRANT` / `COPY` 等一律拒绝 |
+| `SELECT ... INTO` | `POLICY_UNSUPPORTED` | 保守拒绝，避免隐式建表 |
+| 行锁 | `POLICY_FUNC_DENIED` | `FOR UPDATE` / `FOR SHARE` 不支持 |
+| 黑名单函数 | `POLICY_FUNC_DENIED` | AST 检测 + 文本正则双保险 |
+| 无 WHERE 写 | `POLICY_UNFILTERED_WRITE` | 顶层或 CTE 中的 `UPDATE` / `DELETE` 缺少 `WHERE` 即拒绝 |
+| 写操作未确认 | `POLICY_WRITE_CONFIRM_REQUIRED` | 错误信息会说明语句类型与涉及的表 |
+| NL 中生成写语句 | `POLICY_UNSUPPORTED` | 自然语言模式只允许只读 SELECT |
+
+### 函数黑名单
+
+以下函数会被拒绝（大小写不敏感）：
+
+```text
+pg_sleep, pg_sleep_for, pg_read_file, pg_read_binary_file,
+pg_terminate_backend, pg_cancel_backend, pg_ls_dir, pg_stat_file,
+dblink, dblink_exec, lo_import, lo_export, pg_typeof_file
+```
+
+> 黑名单只覆盖已知的高风险函数，不是完整的沙箱。真正的权限边界应由数据库账号控制，见[安全模型](/operations/security)。
+
+### 嵌套写检测
+
+顶层是 SELECT 不代表安全。例如：
+
+```sql
+WITH d AS (DELETE FROM t WHERE id = 1 RETURNING *) SELECT * FROM d
+```
+
+这种可写 CTE 会被识别为写操作，需要 `confirm_write=true`；在 NL 模式下会被直接拒绝。
+
+## 自动改写
+
+### 1. LIMIT 注入与钳制
+
+只处理**顶层** SELECT：
+
+| 原 SQL | `max_rows=100` 时 |
+| --- | --- |
+| `SELECT * FROM t` | `SELECT * FROM t LIMIT 100` |
+| `SELECT * FROM t LIMIT 500` | `... LIMIT 100`（钳制） |
+| `SELECT * FROM t LIMIT 5` | 保持不变 |
+| `SELECT * FROM (SELECT * FROM t LIMIT 999) x` | 内层 LIMIT 不变 |
+| `SELECT a FROM x UNION ALL SELECT b FROM y` | 自动包一层 `LIMIT 100` |
+| `SELECT * FROM t LIMIT n`（非字面量） | 不改写，靠结果截断 |
+
+`max_rows` 会被限制在 `hard_max_rows`（默认 1000）以内。
+
+### 2. 写操作追加 RETURNING
+
+`INSERT` / `UPDATE` / `DELETE` 如果没有 `RETURNING`，会自动追加 `RETURNING *`，把受影响行回显出来：
+
+```sql
+-- 原 SQL
+UPDATE orders SET status = 'done' WHERE id = 42
+-- 实际执行
+UPDATE orders SET status = 'done' WHERE id = 42 RETURNING *
+```
+
+已有 `RETURNING` 时保持原样；DDL 不追加。
+
+### 3. 干跑
+
+`dry_run=true` 时，策略引擎在实际 SQL 前加：
+
+```sql
+EXPLAIN (COSTS, FORMAT JSON) ...
+```
+
+任何语句都只返回执行计划，不执行变更。
+
+## 解析失败时的兜底
+
+sqlglot 无法解析的 SQL 不会直接放行，而是进入保守兜底路径：
+
+- 按引号外的分号切分，检测多语句
+- 按首个关键词分类；只白名单 `SELECT`/`WITH`/`INSERT`/`UPDATE`/`DELETE`/DDL
+- 文本级检测 writable CTE（`INSERT INTO` / `UPDATE ... SET` / `DELETE FROM` / `MERGE INTO`）
+- 文本级检测 `SELECT ... INTO`、黑名单函数、缺少 `WHERE`
+- 无 LIMIT 的 SELECT 按文本追加 `LIMIT`
+
+兜底路径同样遵循写确认与只读要求，但解析能力弱于正常路径。复杂 SQL 建议先确认能被 sqlglot 正常解析。
+
+## 与错误响应的关系
+
+策略违规返回 HTTP 200，响应体：
+
+```json
+{
+  "success": false,
+  "sql": "DELETE FROM t",
+  "error": {
+    "code": "POLICY_UNFILTERED_WRITE",
+    "message": "UPDATE/DELETE 缺少 WHERE 条件，全表写操作默认拒绝"
+  }
+}
+```
+
+这样 Agent 不需要区分 HTTP 层和业务层错误，统一读取 `success` 与 `error.code` 即可。完整错误码见[错误码](/api-reference/errors)。

@@ -1,0 +1,145 @@
+# 故障排查
+
+## 快速定位表
+
+| 现象 | 常见原因 | 处理 |
+| --- | --- | --- |
+| 服务启动即退出 | 默认数据源连不上、配置缺字段、Python 版本过低、端口占用 | 看启动日志第一处报错，见下文 |
+| `/healthz` 为 `degraded` | 某个数据源不可达 | 检查该库网络、账号与 `pg_hba` |
+| 所有请求 401 | Key 不匹配、Header 名不对、环境变量覆盖 | 核对 `X-API-Key` 与 `NL2SQL_API_KEY` |
+| 422 | 请求体类型/范围错误 | 查看响应中的校验详情 |
+| `NOT_FOUND_DATASOURCE` | `datasource` 名称拼错 | 使用配置中的 `name` |
+| `NL_GENERATE_FAILED` | qoder CLI 不可用、超时、提示词过长、输出非 JSON | 检查 LLM 配置与日志 |
+| `NL_REPAIR_EXHAUSTED` | 问题超出 schema/语料能力 | 看 `sql` 与报错，补语料或改用 SQL |
+| `DB_TIMEOUT` | SQL 过重或超时设置过小 | 优化 SQL，或调整超时 |
+| MCP 404 / 401 | 路径或 Header 不对，MCP 未启用 | 核对 `/mcp`、`mcp.enabled`、Key |
+| `markdown` 为 `null` | 未设置 `output=markdown` | 请求加 `"output":"markdown"` |
+| schema 不更新 | 缓存 TTL 未到 | `refresh=1` 或重启 |
+| 审计没有记录 | `audit.enabled=false`，或请求在鉴权阶段失败 | 检查配置；401 本就不落审计 |
+
+## 服务启动失败
+
+启动时会校验**默认数据源**（配置里的第一个）能否执行 `SELECT 1`，失败就直接退出。
+
+排查顺序：
+
+1. 配置是否可解析：`api_key`、`datasources` 是否缺失
+2. 数据库是否可达：`psql -h <host> -p <port> -U <user> -d <database>`
+3. 认证方式：本机 trust 无需密码；远程需 `password` 或正确 `pg_hba`
+4. 端口是否被占用：`ss -lntp | grep 8731`
+5. Python 版本是否为 3.11+：`python3 -V`
+6. 依赖是否安装完整：`pip3 install --user -r requirements.txt`
+
+常见报错：
+
+- `ModuleNotFoundError: No module named 'nl2sql_proxy'`：没有在项目根目录启动
+- `ImportError: cannot import name 'StrEnum'`：Python 低于 3.11
+- `ConnectionRefusedError` / `InvalidPasswordError`：数据库连接配置错误
+
+## 健康检查 degraded
+
+```bash
+curl -s http://127.0.0.1:8731/healthz
+```
+
+返回 `down` 的数据源不可达。`/healthz` 会对每个数据源执行一次 `SELECT 1`，会懒创建对应的连接池。
+
+## 鉴权失败（401）
+
+- HTTP 用 `X-API-Key: <key>` 或 `Authorization: Bearer <key>`
+- 检查环境变量 `NL2SQL_API_KEY` 是否覆盖了配置文件中的 `api_key`
+- MCP 也需要同一个 Header（除非 `mcp.require_auth: false`）
+
+## 数据库超时（DB_TIMEOUT）
+
+实际超时取两者较小值：
+
+```text
+min(请求 timeout_seconds, 数据源 statement_timeout_ms)
+```
+
+- 先确认 `timeout_seconds`（默认 30）是否足够
+- 再确认数据源的 `statement_timeout_ms`（默认 60000）
+- 超时后连接会被丢弃并由连接池补充，不会复用不确定状态的连接
+- 反复超时通常意味着 SQL 需要优化或缺少索引
+
+## NL_GENERATE_FAILED
+
+按顺序排查：
+
+1. **CLI 是否存在且可执行**
+
+   ```bash
+   ls -l /root/.qoder-cn/entry/qodercn
+   /root/.qoder-cn/entry/qodercn --version
+   ```
+
+2. **模型与超时**：检查 `llm.model`、`llm.timeout_seconds`；冷启动慢可适当调大
+3. **提示词过长**：日志中会出现 `NL prompt 超长`；可减少 `top_k_tables` / `fewshot_count`，或补充表描述让剪枝更准
+4. **输出非 JSON**：日志会出现 `qoder 输出无法解析为 JSON`，通常重试即可；持续出现说明 CLI 输出格式异常
+5. **并发过高**：`llm.concurrency` 过大会导致内存压力与超时，默认 3；每并发一个子进程约占数百 MB
+
+## NL_REPAIR_EXHAUSTED
+
+表示生成的 SQL 连续未通过校验/执行，修复轮数（默认 2）已耗尽。
+
+处理步骤：
+
+1. 看响应中的 `sql` 字段，确认模型写了什么
+2. 看 `error.message`：
+   - 表/列不存在 → 检查剪枝是否漏表，补充 `schema_overrides` 或 few-shot
+   - 口径不对 → 补充 `glossary.yaml`
+   - 语法/函数问题 → 补充正确示例
+3. 强刷 schema：`curl "$API/v1/schema?datasource=datav&refresh=1" -H "X-API-Key: $KEY"`
+4. 该问题口径固定时，直接用 `mode=sql` 固化 SQL
+
+## MCP 连接失败
+
+- 端点必须是 `http://127.0.0.1:8731/mcp`（由 `mcp.mount_path` 决定）
+- 服务启动日志应包含 `MCP 已挂载：/mcp（streamable-http）`
+- 确认客户端使用 streamable-http 传输，而不是 SSE / stdio
+- 401：检查 `X-API-Key` 请求头
+- 404：`mcp.enabled` 是否为 `true`，路径是否一致
+
+## 写操作仍被拒绝
+
+| 错误码 | 检查点 |
+| --- | --- |
+| `POLICY_WRITE_CONFIRM_REQUIRED` | 请求是否传了 `"confirm_write": true` |
+| `POLICY_UNFILTERED_WRITE` | UPDATE/DELETE 是否带 WHERE（包括 CTE 内的写节点） |
+| `POLICY_MULTIPLE_STATEMENTS` | 是否一次提交了多条语句 |
+| `POLICY_UNSUPPORTED` | 是否使用了事务、SET、GRANT、COPY、SELECT INTO |
+
+## schema 不更新
+
+- 缓存 TTL 为 10 分钟
+- 强制刷新：`GET /v1/schema?datasource=<name>&refresh=1`
+- `schema_overrides` 修改后需要**重启服务**
+- 表结构变更也可能影响 NL 的剪枝与生成，建议变更后强刷并回归
+
+## 审计没有记录
+
+- `audit.enabled` 是否为 `true`
+- 请求是否真的到达引擎（401 不会落审计）
+- `audit.sqlite_path` 是否可写；检查服务日志
+- 数据库文件是否被移到其他路径（路径按配置文件目录解析）
+
+## 其他
+
+**能不能多开 worker？**
+
+不能。连接池、schema 缓存、审计连接、LLM 并发信号量都在进程内，多 worker 会造成状态分裂。需要横向扩展时，请在架构层另做设计。
+
+**返回结果为什么被截断？**
+
+- SQL 层：LIMIT 注入/钳制（`max_rows`，硬上限 1000）
+- 表格层：markdown 最多 20 列，单元格超过 200 字符截断，换行折叠为 `␤`
+
+**怎么跑测试？**
+
+```bash
+cd /root/native_nl2sql
+python3 -m pytest tests/ -v
+```
+
+覆盖策略引擎、JSON 解析、格式化、schema 剪枝与 NL 修复循环。

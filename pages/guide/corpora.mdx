@@ -1,0 +1,100 @@
+# 业务语料维护
+
+NL2SQL 的准确率很大程度上取决于三份业务知识：术语表、few-shot 样例、表描述覆盖。它们都是普通 YAML/配置，改完重启服务即可生效。
+
+## 业务术语表 `glossary.yaml`
+
+按数据源分组，每个条目包含术语、含义和对应的字段/视图。
+
+```yaml
+datav:
+  - term: 开盒/盒数
+    meaning: 1 盒必出 1 件奖品，盒数=奖品件数
+    maps_to: "v_gift_purchase.qty；按日用 v_xindong_base_daily.boxes"
+  - term: 成本
+    meaning: 开盒花费 = 盒数 × 150 电池/盒
+    maps_to: "v_gift_purchase.cost_battery"
+```
+
+注入提示词后的形式：
+
+```text
+- "开盒/盒数": 1 盒必出 1 件奖品，盒数=奖品件数（对应：v_gift_purchase.qty；按日用 v_xindong_base_daily.boxes）
+```
+
+编写建议：
+
+- **只写有歧义的词**：行业黑话、内部简称、容易和字面意思混淆的指标
+- `meaning` 写清计算口径，`maps_to` 尽量落到具体表/列/视图
+- 同一术语在不同数据源含义不同时，分别放在各自分组下
+- 术语是“提示”而不是强制规则，模型仍可能不完全遵守，关键口径建议配合 few-shot
+
+## few-shot 样例 `fewshots.yaml`
+
+按数据源分组，每条是“问题 → SQL”，可选 `note` 说明口径：
+
+```yaml
+datav:
+  - q: "最近7天每天开了多少盒"
+    sql: "SELECT d AS 日期, boxes AS 盒数 FROM v_xindong_base_daily ORDER BY d DESC LIMIT 7"
+    note: "按日盒数直接取汇总视图，口径=审计窗口内基础态"
+  - q: "城堡爆率最高的前5个房间"
+    sql: "SELECT room_id, anchor_name AS 主播, castle_pct AS 城堡爆率, boxes AS 盒数 FROM v_xindong_base_room ORDER BY castle_pct DESC LIMIT 5"
+    note: "爆率已是百分比数值，直接排序"
+```
+
+工作方式：
+
+- 每次请求按 2-gram 相似度从样例中选 `nl2sql.fewshot_count` 条（默认 3）
+- 样例 SQL 引用但剪枝未选中的表会自动补进表结构（最多补 4 张，表总数较多时提前停止）
+- `note` 会随样例一起注入，适合写口径陷阱和字段选择理由
+
+什么时候加样例：
+
+- 某类问题反复生成错误 SQL（选错表、选错视图、聚合口径错误）
+- 有固定业务口径的常用报表
+- 复杂 JOIN 或窗口函数写法希望被复用
+
+添加时注意：
+
+- SQL 必须是**单条只读 SELECT**，且只使用真实存在的表/列
+- 问题和 SQL 都要与 `glossary.yaml` 的口径一致
+- 样例不是越多越好：不相关的样例会被相似度过滤，但语义相近的错误样例可能误导模型
+
+## 表描述覆盖 `schema_overrides`
+
+数据库里没有 `COMMENT` 的表/列，模型只能靠名字猜含义。可以在配置里补充：
+
+```yaml
+schema_overrides:
+  datav:
+    tables:
+      gifts:
+        desc: "礼物流水底表（700万行级），分析优先用各 v_* 汇总视图"
+        columns:
+          castle_raw: "城堡原始计数（未封顶）"
+  blindbox:
+    tables: {}
+```
+
+- `desc` 和列描述会**追加**到数据库原有注释后面（用 `；` 连接）
+- 覆盖内容会进入 schema 缓存，修改配置后需要重启服务
+- 该配置同时影响 NL 提示词与 `/v1/schema` 返回结果
+
+## 推荐维护流程
+
+1. 用真实问题调用 NL 模式，检查返回的 `sql` 与 `assumptions`
+2. 判断问题类型：
+
+   | 现象 | 处理 |
+   | --- | --- |
+   | 口径理解错误（“盒数”“真人”“成本”等） | 补 `glossary.yaml` |
+   | 选错表/视图，或漏掉关键列 | 补 `schema_overrides`，或把正确写法加入 `fewshots.yaml` |
+   | SQL 聚合/排序/时间处理写错 | 加入 `fewshots.yaml` |
+   | 表太多导致剪枝遗漏 | 提高 `nl2sql.top_k_tables`，或给表补描述 |
+
+3. 重启服务
+4. 用同一批问题回归，确认 `assumptions` 与结果符合预期
+5. 把验证过的“问题 → SQL”沉淀为 few-shot
+
+> 建议把语料文件纳入版本管理，变更时记录原因和影响的口径，便于回溯。

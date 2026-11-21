@@ -1,60 +1,46 @@
-# Nextra Documentation Template
+# nl2sql-proxy 使用手册
 
-This is a template for creating documentation using [Nextra](https://nextra.site). Nextra is a simple, powerful, and flexible site generation framework integrated with all the excellent features of Next.js.
+PostgreSQL 统一查询代理 **nl2sql-proxy** 的用户手册，基于 [Nextra](https://nextra.site) 构建，支持静态导出。
 
-You can use this as a starting template for your own project.
+手册内容覆盖：安装启动、配置、HTTP API、MCP 接入、SQL 安全策略、NL2SQL 原理、业务语料维护、审计与安全、故障排查。
 
-## Deploy
-
-[![Deploy with EdgeOne Pages](https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg)](https://edgeone.ai/pages/new?template=nextra-docs-template)
-
-## Installation
+## 本地开发
 
 ```bash
-npm i
+npm install
+npm run dev      # http://localhost:3000
 ```
 
-## Local Development
-
-### Starting the Project
+## 构建静态站点
 
 ```bash
-npm dev
+npm run build    # 导出到 out/（next.config.mjs 中 output: 'export'）
 ```
 
-This command starts a local development server and opens a browser window. Then visit localhost:3000.
+`out/` 目录可直接部署到任意静态托管。
 
-### Creating New Documentation Pages
+## 目录结构
 
-In the Nextra framework, creating new documentation pages is very intuitive. Simply create a new `.mdx` file in the `/pages` directory, and the system will automatically add it to the document structure. The navigation menu will automatically generate corresponding paths and links based on the filename.
-
-**Examples:**
-
-- Creating `/pages/getting-started.mdx` will generate a "Getting Started" entry in the navigation
-- Creating `/pages/advanced/configuration.mdx` will generate a "Configuration" entry under the "Advanced" category
-
-### Customizing Navigation and Structure
-
-If you need fine-grained control over the navigation structure, you can customize it by editing the `/pages/_meta.js` file:
-
-- Reorder navigation items
-- Customize display names (not restricted by filenames)
-- Set navigation hierarchy and grouping
-- Hide specific pages
-- Add external links
-
-The `_meta.js` file gives you complete control over how your documentation is presented, ensuring users get the best navigation experience.
-
-### Best Practices
-
-- Use clear, descriptive filenames to ensure a reasonable navigation structure even without configuring `_meta.js`
-- Create consistent directory structures for common content patterns
-- When dealing with large documentation, carefully design the navigation structure through `_meta.js`
-
-This flexible page creation mechanism makes Nextra an ideal choice for building structured documentation websites.
-
-## Building
-
-```bash
-npm run build
+```text
+pages/
+  index.mdx                  # 简介
+  getting-started/           # 安装、快速上手、配置
+  guide/                     # 架构、查询模式、安全策略、NL2SQL、语料、Schema、MCP、输出
+  api-reference/             # HTTP API、MCP 工具、错误码
+  operations/                # 安全模型、审计、故障排查
+  faq.mdx                    # 常见问题
+theme.config.tsx             # 站点导航、Logo、页脚与 SEO
 ```
+
+## 内容维护
+
+- 页面为 MDX，直接编辑 `pages/` 下文件
+- 侧边栏顺序由各目录的 `_meta.js` 控制
+- 站点标题、Logo、页脚在 `theme.config.tsx`
+- 内部链接使用站内路径，例如 `/guide/query-modes`
+
+> 本仓库只包含文档站，不包含 nl2sql-proxy 服务源码。
+
+## 许可
+
+MIT

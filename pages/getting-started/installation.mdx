@@ -1,36 +1,120 @@
-# Installation
+# 安装与启动
 
-## Prerequisites
+## 前置条件
 
-Before you begin, make sure you have the following installed:
-- Node.js 16.8 or later
-- npm or yarn or pnpm
+| 依赖 | 要求 | 说明 |
+| --- | --- | --- |
+| Python | 3.11 及以上 | 代码使用了 `enum.StrEnum` 等 3.11+ 特性 |
+| PostgreSQL | 16（推荐） | NL2SQL 提示词按 PostgreSQL 16 方言生成；代理本身可连接其他 PG 版本 |
+| qoder CLI | 可执行文件 | NL 模式依赖它调用 `DeepSeek-Flash`，默认路径 `/root/.qoder-cn/entry/qodercn` |
+| 网络 | 能访问目标数据库 | 默认通过 `127.0.0.1:5432` 连接 |
 
-## Installation Steps
+> **单进程运行**：连接池、schema 缓存、审计连接、LLM 并发信号量均为进程内状态，部署时请只启动**一个 worker**。
 
-1. Create a new project:
+## 安装步骤
+
+### 1. 进入项目目录并安装依赖
+
 ```bash
-npx create-next-app@latest my-docs
+cd /root/native_nl2sql
+pip3 install --user -r requirements.txt
 ```
 
-2. Install Nextra:
+依赖清单：`fastapi`、`uvicorn`、`asyncpg`、`pydantic`、`PyYAML`、`sqlglot`、`mcp`、`aiosqlite`。
+
+### 2. 生成配置文件
+
 ```bash
-npm install nextra nextra-theme-docs
+cp config.example.yaml config.yaml
 ```
 
-3. Configure your project by updating `next.config.js`:
-```js
-const withNextra = require('nextra')({
-  theme: 'nextra-theme-docs',
-  themeConfig: './theme.config.jsx'
-})
+然后至少修改两处：
 
-module.exports = withNextra()
+- `api_key`：换成强随机字符串（也可以改用环境变量 `NL2SQL_API_KEY`）
+- `datasources`：改成实际的数据库地址、库名、用户名（本机 `pg_hba` 为 trust 时可省略 `password`）
+
+```yaml
+api_key: "换成强随机值"
+
+datasources:
+  - name: datav
+    host: 127.0.0.1
+    port: 5432
+    database: datav
+    user: postgres
 ```
 
-4. Start the development server:
+完整字段见[配置详解](/getting-started/configuration)。
+
+### 3. 启动服务
+
+方式一，直接使用 uvicorn（推荐）：
+
 ```bash
-npm run dev
+python3 -m uvicorn nl2sql_proxy.main:app --host 127.0.0.1 --port 8731
 ```
 
-Your documentation site should now be running at `http://localhost:3000`! 
+方式二，使用内置入口（读取配置里的 `server.host` / `server.port`）：
+
+```bash
+python3 -m nl2sql_proxy.main
+```
+
+如果需要指定其他配置文件：
+
+```bash
+NL2SQL_CONFIG=/etc/nl2sql/config.yaml \
+  python3 -m uvicorn nl2sql_proxy.main:app --host 127.0.0.1 --port 8731
+```
+
+### 4. 验证
+
+```bash
+curl -s http://127.0.0.1:8731/healthz
+```
+
+正常返回：
+
+```json
+{"status":"ok","datasources":{"datav":"ok","blindbox":"ok"}}
+```
+
+如果有数据源不可达，`status` 为 `degraded`，对应数据源为 `down`。
+
+## 启动时发生了什么
+
+1. 读取配置（`NL2SQL_CONFIG` 或当前目录 `config.yaml`），解析相对路径
+2. 创建数据源连接池，并校验**第一个数据源**（默认数据源）可连通；失败会导致启动失败
+3. 初始化审计库（SQLite WAL、自动建表、按留存天数清理）
+4. 挂载 MCP 子应用到 `mcp.mount_path`（默认 `/mcp`）
+5. 预热默认数据源的 schema；预热失败只打印告警，首次请求会重试
+
+启动日志出现下面这行即表示就绪：
+
+```text
+nl2sql-proxy 就绪：datasources=['datav', 'blindbox'] mcp=True
+```
+
+## 使用 systemd 托管
+
+```ini
+[Unit]
+Description=nl2sql-proxy
+After=network.target postgresql.service
+
+[Service]
+WorkingDirectory=/root/native_nl2sql
+Environment=NL2SQL_API_KEY=换成强随机值
+ExecStart=/usr/bin/python3 -m uvicorn nl2sql_proxy.main:app --host 127.0.0.1 --port 8731
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+systemctl daemon-reload
+systemctl enable --now nl2sql-proxy
+```
+
+> **对外提供服务时**不要让服务直接监听 `0.0.0.0`。推荐保持 `127.0.0.1`，通过 nginx 反向代理或 SSH 隧道对外暴露，并在外层加 TLS。详见[安全模型](/operations/security)。

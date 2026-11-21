@@ -1,48 +1,76 @@
-# Welcome to Nextra Template
+# nl2sql-proxy 使用手册
 
-## Fast and Modern
+**一个入口，查所有库。** nl2sql-proxy 是 PostgreSQL 的统一查询代理：外部系统不再直连数据库，而是向本服务提交**自然语言问题**或 **SQL**，统一拿到查询结果、最终执行的 SQL 与审计记录。
 
-Nextra is a Next.js-based documentation framework that makes it easy to create beautiful documentation sites.
+## 它解决什么问题
 
-## Quick Start
+- 数据分散在多个 PostgreSQL 库和视图里，业务方与 Agent 各自维护连接、查询脚本
+- 自然语言问数需要稳定的表结构筛选、业务口径与失败重试
+- 直接发放数据库账号风险大，缺少统一的安全门禁和操作审计
+
+## 核心能力
+
+| 能力 | 说明 |
+| --- | --- |
+| 双模式查询 | `mode=nl` 自然语言问数，`mode=sql` 直接执行 SQL，`auto` 自动识别 |
+| 多数据源 | 在配置文件中声明多个 PostgreSQL 数据源，按 `datasource` 路由 |
+| 安全策略 | 单语句限制、只读复检、函数黑名单、无 WHERE 写拒绝、写操作二次确认 |
+| SQL 改写 | 无 LIMIT 的 SELECT 自动注入 LIMIT；写操作自动追加 `RETURNING *` |
+| NL2SQL | qoder CLI 生成 → 静态校验 → 执行 → 数据库报错回传修复（最多 2 轮） |
+| Schema 自助 | `/v1/schema` 接口与 MCP 工具，内省结果缓存 10 分钟 |
+| 双协议接入 | HTTP JSON API 与 MCP（streamable-http），Agent 一次工具调用即可查库 |
+| 审计日志 | 每次请求落 SQLite：谁、何时、输入、最终 SQL、行数、耗时、错误码 |
+
+## 三十秒体验
+
+假设服务已在 `127.0.0.1:8731` 启动，API Key 为 `YOUR_KEY`：
 
 ```bash
-# Create a new project
-npx create-next-app@latest my-docs
+API=http://127.0.0.1:8731
 
-# Install Nextra
-npm install nextra nextra-theme-docs
+# 1. 健康检查（无需鉴权）
+curl -s $API/healthz
 
-# Start the development server
-npm run dev
+# 2. 自然语言问数
+curl -s -X POST $API/v1/query \
+  -H 'X-API-Key: YOUR_KEY' -H 'Content-Type: application/json' \
+  -d '{"input":"最近7天每天开了多少盒","mode":"nl","datasource":"datav"}'
+
+# 3. 直接执行 SQL，返回 markdown 表格
+curl -s -X POST $API/v1/query \
+  -H 'X-API-Key: YOUR_KEY' -H 'Content-Type: application/json' \
+  -d '{"input":"SELECT * FROM purchases","mode":"sql","output":"markdown","max_rows":5}'
 ```
 
-## Beautiful by Default
+## 手册导航
 
-Built with modern design principles and best practices in mind, Nextra provides a beautiful and responsive documentation experience.
+| 章节 | 适合谁 | 内容 |
+| --- | --- | --- |
+| [安装与启动](/getting-started/installation) | 运维 / 首次部署 | 依赖、启动、systemd、验证 |
+| [快速上手](/getting-started/quick-start) | 所有使用者 | SQL / NL / 写操作 / Schema / MCP 的常用调用 |
+| [配置详解](/getting-started/configuration) | 运维 / 管理员 | 全部配置项、环境变量、路径解析规则 |
+| [架构与请求流程](/guide/architecture) | 二次开发 / 排障 | 组件职责、请求生命周期、启动顺序 |
+| [查询模式](/guide/query-modes) | 所有使用者 | `auto`/`nl`/`sql` 的差异与请求字段 |
+| [SQL 安全策略](/guide/sql-policy) | 使用者 / 安全审计 | 允许与拒绝的语句、自动改写规则 |
+| [NL2SQL 工作原理](/guide/nl2sql) | 使用者 / 语料维护 | 生成、剪枝、修复循环与限制 |
+| [业务语料维护](/guide/corpora) | 数据分析 / 业务方 | 术语表、few-shot、表描述覆盖 |
+| [MCP 接入](/guide/mcp) | Agent 开发者 | Claude Code / 通用 MCP 客户端接入 |
+| [API 参考](/api-reference/http) | 集成开发者 | HTTP 接口、MCP 工具、错误码 |
+| [安全模型](/operations/security) | 管理员 / 安全 | 密钥、写门禁、数据库暴露面 |
+| [审计日志](/operations/audit) | 管理员 / 审计 | 落库字段、查询与留存 |
+| [故障排查](/operations/troubleshooting) | 运维 / 使用者 | 常见错误与定位步骤 |
 
-## Key Features
+## 架构一览
 
-### MDX Support
-Write content in Markdown and use React components when needed.
+```text
+Client ── HTTP POST /v1/query ──► FastAPI ─┐
+Client ── MCP streamable-http /mcp ────────┤
+                                           ▼
+                                      QueryEngine
+   ┌──────────┬───────────┬────────────┬────────────┬──────────┐
+   ▼          ▼           ▼            ▼            ▼          ▼
+ PoolRegistry SQLPolicy  SchemaCache  NL2SQL      Formatter  AuditLog
+ (asyncpg×N) (sqlglot)   (pg_catalog) (qoder CLI) (md/json)  (SQLite)
+```
 
-### Theme Customization
-Customize the theme to match your brand and style.
-
-### Full-text Search
-Built-in search functionality to help users find content quickly.
-
-## Why Nextra?
-
-### Simple and Intuitive
-Nextra provides a simple and intuitive way to create documentation sites. No complex configuration needed.
-
-### Built on Next.js
-Leverage the power of Next.js for fast page loads and great developer experience.
-
-### Active Community
-Join our growing community of developers and contributors.
-
-## Get Started
-
-- [Examples](/examples) - Check out our examples to see what's possible with Nextra
+> **设计前提**：服务按**单进程**设计（连接池、缓存、审计、LLM 并发信号量都在进程内），部署时只启动一个 worker。

@@ -1,0 +1,117 @@
+# MCP 接入
+
+服务在同一进程内挂载了 [MCP](https://modelcontextprotocol.io) 服务，传输方式为 **streamable-http**，无状态（stateless）。Agent 接入后，查库就是一次工具调用，不再需要重复编写连接与查询脚本。
+
+## 端点与鉴权
+
+- 端点：`http://127.0.0.1:8731/mcp`（路径由 `mcp.mount_path` 配置）
+- 鉴权：与 HTTP API 相同的 `X-API-Key`（或 `Authorization: Bearer`）
+- 关闭鉴权：`mcp.require_auth: false`（仅建议在内网隔离环境使用）
+- 关闭 MCP：`mcp.enabled: false`
+
+鉴权失败返回 HTTP 401：
+
+```json
+{"error": "unauthenticated", "message": "缺失或无效的 X-API-Key"}
+```
+
+## 可用工具
+
+| 工具 | 用途 | 关键参数 |
+| --- | --- | --- |
+| `run_sql` | 直接执行 SQL | `sql`、`datasource`、`max_rows`、`confirm_write`、`dry_run` |
+| `ask_db` | 自然语言问数 | `question`、`datasource`、`max_rows`、`timeout_seconds` |
+| `list_tables` | 列出所有表/视图 | `datasource` |
+| `describe_table` | 查看表结构 | `table`、`datasource` |
+
+完整参数与默认值见 [MCP 工具](/api-reference/mcp-tools)。
+
+## Claude Code
+
+```bash
+claude mcp add --transport http nl2sql \
+  http://127.0.0.1:8731/mcp \
+  --header "X-API-Key: YOUR_KEY"
+```
+
+添加后可以在会话中直接让 Agent 查数：
+
+```text
+用 ask_db 查一下 datav 库最近 7 天每天开了多少盒
+```
+
+## 通用 MCP 客户端
+
+Claude Desktop、Cursor 等客户端通常使用如下 JSON 配置（不同客户端对 `type` 的取值可能是 `http` 或 `streamable-http`，以客户端文档为准）：
+
+```json
+{
+  "mcpServers": {
+    "nl2sql": {
+      "type": "http",
+      "url": "http://127.0.0.1:8731/mcp",
+      "headers": {
+        "X-API-Key": "YOUR_KEY"
+      }
+    }
+  }
+}
+```
+
+> MCP 服务只监听在代理所在机器的 `127.0.0.1`。如果 Agent 在另一台机器上，请通过 SSH 隧道或反向代理暴露，不要直接开放端口。
+
+## Python 客户端
+
+项目 README 提供的示例（`mcp` 2.x）：
+
+```python
+import asyncio, httpx2
+from mcp.client.streamable_http import streamable_http_client
+from mcp import ClientSession
+
+async def main():
+    async with streamable_http_client(
+            "http://127.0.0.1:8731/mcp",
+            http_client=httpx2.AsyncClient(headers={"X-API-Key": "你的key"})) as (r, w):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            res = await s.call_tool("ask_db", {"question": "最近7天每天开了多少盒",
+                                               "datasource": "datav"})
+            print(res.content[0].text)
+
+asyncio.run(main())
+```
+
+## 工具返回什么
+
+MCP 工具内部复用 `QueryEngine`，结果渲染为纯文本（markdown），包含：
+
+```text
+SQL: SELECT d AS 日期, boxes AS 盒数 FROM v_xindong_base_daily ORDER BY d DESC LIMIT 7
+
+| 日期 | 盒数 |
+|---|---|
+| 2026-11-20 | 1321 |
+
+口径假设: “最近7天”指含今天在内的 7 个自然日
+（生成过程中自动修复 1 轮）
+```
+
+- 成功：最终 SQL + markdown 表格 + 受影响行数（写操作）+ 口径假设 + 修复轮数
+- 失败：`失败 [错误码]: 错误信息` + 尽力返回的 SQL
+
+## 默认超时
+
+| 工具 | 默认 `timeout_seconds` |
+| --- | --- |
+| `run_sql` | 30 |
+| `ask_db` | 60 |
+
+NL 生成本身还会受 `llm.timeout_seconds`（默认 90 秒）约束。复杂问题可适当调大 `timeout_seconds`，上限 300。
+
+## 使用建议
+
+- 提问前先调用 `list_tables` / `describe_table`，能显著提升 `ask_db` 的准确率
+- 精确查询、固定报表、写操作用 `run_sql`；探索分析用 `ask_db`
+- 写操作必须显式传 `confirm_write=true`，请在 Agent 侧设计人工确认流程
+- 始终检查返回的 SQL 与口径假设；MCP 不改变 NL 模式只读的限制

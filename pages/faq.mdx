@@ -1,38 +1,112 @@
-# Frequently Asked Questions
+# 常见问题
 
-## General Questions
+## 产品与能力
 
-### What is Nextra?
-Nextra is a Next.js-based documentation framework that makes it easy to create beautiful documentation sites.
+**nl2sql-proxy 和数据直连有什么区别？**
 
-### Is Nextra free to use?
-Yes, Nextra is open source and free to use under the MIT license.
+服务把所有数据库访问收敛到一个受控接口：统一鉴权、SQL 安全策略、行数限制、审计和 NL2SQL。调用方（尤其是 Agent）不需要数据库账号，也不需要重复写连接与查询脚本。
 
-## Technical Questions
+**支持哪些数据库？**
 
-### How do I add custom components?
-You can create custom components in the `components` directory and import them in your MDX files:
+只支持 PostgreSQL。NL2SQL 的提示词按 PostgreSQL 16 方言生成，SQL 改写与内省也依赖 PostgreSQL 系统目录。
 
-```jsx
-import { MyComponent } from '../components/MyComponent'
+**能不能执行写操作？**
 
-<MyComponent />
+可以，但必须走 `mode=sql` 并显式传 `confirm_write=true`；无 WHERE 的 UPDATE/DELETE、多语句、事务语句等会被拒绝。自然语言模式永远只读。
+
+**NL 模式会修改数据吗？**
+
+不会。提示词约束模型只生成 SELECT，执行前还会经过一次只读静态复检，双重保险。
+
+**NL 模式会改表结构吗？**
+
+不会。DDL 属于写操作，NL 模式直接拒绝。
+
+## 配置与部署
+
+**必须安装 qoder CLI 吗？**
+
+只有 `mode=nl` / `auto` 路由到 NL 时需要。只用 `mode=sql` 时可以忽略 LLM 配置，但服务启动时仍会初始化 `QoderLLM` 对象（不会调用 CLI）。
+
+**可以启动多个实例/worker 吗？**
+
+不建议。服务按单进程设计：连接池、schema 缓存、审计连接、LLM 并发信号量都是进程内状态。多实例会带来缓存不一致与并发失控。需要扩展时请先改造架构。
+
+**如何新增数据源？**
+
+在 `config.yaml` 的 `datasources` 里追加一项，重启服务。请求时通过 `datasource` 指定；不指定则使用第一个。
+
+**如何修改端口？**
+
+改 `server.port`，用 `python3 -m nl2sql_proxy.main` 启动；或用 uvicorn 命令行 `--port`。同时记得更新客户端与 MCP 配置。
+
+**服务能直接对外开放吗？**
+
+不要。默认只监听 `127.0.0.1`，请通过 nginx 反代（加 TLS、限流）或 SSH 隧道暴露。详见[安全模型](/operations/security)。
+
+## 使用与效果
+
+**为什么我提交的 SQL 被改了？**
+
+策略引擎会自动加 LIMIT（或把过大的 LIMIT 钳制到 `max_rows`），写操作会追加 `RETURNING *`。响应中的 `sql` 字段是最终执行的 SQL。
+
+**为什么查询结果不全？**
+
+`max_rows` 默认 100，硬上限 1000；markdown 最多渲染 20 列、单元格超过 200 字符会截断。需要更多行时调大 `max_rows`（不超过 1000）。
+
+**markdown 字段为什么是 null？**
+
+`output` 默认是 `json`，需要显式传 `"output": "markdown"`。MCP 工具固定返回 markdown。
+
+**NL 问数不准怎么办？**
+
+按顺序尝试：
+
+1. 看响应的 `sql` 和 `nl_meta.assumptions`，确认是口径问题还是表选择问题
+2. 口径问题 → 补 `glossary.yaml`
+3. 表/列问题 → 补 `schema_overrides`，或把正确 SQL 加入 `fewshots.yaml`
+4. 提高 `top_k_tables`（表很多时）
+5. 强刷 schema 后重试
+
+**怎么让 NL 支持新的业务口径？**
+
+把术语写进 `glossary.yaml`，把验证过的“问题 → SQL”写进 `fewshots.yaml`，重启服务。详见[业务语料维护](/guide/corpora)。
+
+**自然语言问题的数据会发给模型吗？**
+
+问题、剪枝后的表结构、术语表、few-shot、生成 SQL 与数据库报错会发送给 qoder CLI（DeepSeek-Flash）。**查询结果行不会发送**。敏感场景请评估后使用，或只用 SQL 模式。
+
+## 安全与审计
+
+**Key 泄露了怎么办？**
+
+立即更换 `NL2SQL_API_KEY`（或配置中的 `api_key`）并重启服务，同时更新所有客户端与 MCP 配置。审计中的 `api_key_hint` 可帮助你确认旧 Key 的使用情况。
+
+**为什么 401 请求在审计里查不到？**
+
+鉴权发生在进入查询引擎之前，审计只覆盖进入引擎的请求。401 的访问日志请在反向代理层查看。
+
+**审计能保留多久？**
+
+默认 90 天，每次启动时清理更早记录；`retention_days <= 0` 表示不清理。审计文件权限为 600，可自行备份与归档。
+
+**能不能只用只读账号？**
+
+可以，而且推荐。代理的权限上限就是配置的数据库账号；生产环境不要用超级用户，按需授予 SELECT（以及必要的写权限）。见[安全模型](/operations/security)。
+
+## 开发与测试
+
+**文档中的示例数据源名为什么是 `datav` / `blindbox`？**
+
+这是示例配置。实际名称由你的 `config.yaml` 决定，请求和 MCP 工具都使用配置里的 `name`。
+
+**如何运行测试？**
+
+```bash
+cd /root/native_nl2sql
+python3 -m pytest tests/ -v
 ```
 
-### How do I customize the theme?
-You can customize the theme by modifying the `theme.config.jsx` file. Check out the [theme configuration](/api-reference/configuration) for more details.
+**日志在哪里看？**
 
-### Can I use TypeScript?
-Yes, Nextra fully supports TypeScript. You can use `.tsx` and `.ts` files in your project.
-
-## Deployment
-
-### How do I deploy my Nextra site?
-You can deploy your Nextra site to any platform that supports Next.js, such as:
-- Vercel
-- Netlify
-- GitHub Pages
-- AWS Amplify
-
-### Do I need a server?
-No, Nextra can be exported as a static site and hosted anywhere.
+服务输出到标准输出（由 uvicorn/systemd 收集）。关键日志包括 schema 预热失败、MCP 挂载、NL 修复轮次与 qoder 调用失败。生产环境建议接入 journald 或日志平台。

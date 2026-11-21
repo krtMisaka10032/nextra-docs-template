@@ -1,0 +1,109 @@
+# 查询模式
+
+`/v1/query` 用同一个入口处理三种模式：
+
+| `mode` | 行为 | 适用场景 |
+| --- | --- | --- |
+| `sql` | 直接执行 SQL（遵守安全策略） | 精确查询、固定报表、写操作 |
+| `nl` | 自然语言 → 只读 SQL → 执行 | 探索分析、业务人员问数 |
+| `auto`（默认） | 自动判断走 `sql` 还是 `nl` | 通用入口、未知输入类型 |
+
+## auto 的判定规则
+
+服务用 sqlglot 尝试解析 `input`：
+
+- 能解析为**单条** `SELECT` / `INSERT` / `UPDATE` / `DELETE` / DDL 语句 → 按 `sql` 处理
+- 解析失败、包含多条语句、或其他文本 → 按 `nl` 处理
+
+例如：
+
+| 输入 | 路由结果 |
+| --- | --- |
+| `SELECT * FROM t WHERE id = 1` | `sql` |
+| `UPDATE t SET a = 1 WHERE id = 1` | `sql`（仍需 `confirm_write`） |
+| `最近7天每天开了多少盒` | `nl` |
+| `帮我查一下 orders` | `nl` |
+
+> 中文占多数的输入一般都会进入 NL 模式；如果想要确定性，建议显式传 `mode`。
+
+## 请求字段
+
+```json
+{
+  "input": "最近7天每天开了多少盒",
+  "mode": "nl",
+  "datasource": "datav",
+  "output": "json",
+  "max_rows": 100,
+  "timeout_seconds": 30,
+  "dry_run": false,
+  "confirm_write": false
+}
+```
+
+| 字段 | 类型 | 默认值 | 约束 | 说明 |
+| --- | --- | --- | --- | --- |
+| `input` | string | 必填 | 1–8000 字符 | SQL 或自然语言问题 |
+| `mode` | string | `auto` | `auto` / `nl` / `sql` | 查询模式 |
+| `datasource` | string | 第一个数据源 | 必须是配置中的 `name` | 数据源路由 |
+| `output` | string | `json` | `json` / `markdown` | 为 `markdown` 时响应包含表格字段 |
+| `max_rows` | int | `100` | 1–1000 | 行数上限；同时受 `hard_max_rows` 约束 |
+| `timeout_seconds` | number | `30` | 1–300 | 单查询超时 |
+| `dry_run` | bool | `false` | — | 只执行 `EXPLAIN (COSTS, FORMAT JSON)` |
+| `confirm_write` | bool | `false` | — | 写操作（含 DDL）必须显式设为 `true` |
+
+## 输出选择
+
+- `output=json`：返回结构化字段 `columns` / `rows` / `row_count` 等，`markdown` 为 `null`
+- `output=markdown`：额外生成 `markdown` 表格字段，适合直接贴回对话上下文
+- MCP 工具固定使用 markdown 渲染，无需指定该字段
+
+字段完整说明见[输出格式](/guide/output)。
+
+## 数据源路由
+
+- 不传 `datasource`：使用配置中的第一个数据源（默认数据源）
+- 传了不存在的名称：返回 `NOT_FOUND_DATASOURCE`，错误信息里会列出可用数据源
+- `/v1/schema` 类接口传错数据源返回 HTTP 404
+
+## 模式注意事项
+
+### SQL 模式
+
+- 会经过完整安全策略：单语句、无危险函数、写操作确认等
+- `dry_run=true` 时任何语句都只出执行计划
+- 写操作会自动追加 `RETURNING *`（若原本没有），并回显受影响行
+
+### NL 模式
+
+- **固定只读**：只生成 SELECT，写操作会被静态复检拦截
+- 可以通过 `dry_run=true` 查看 NL 生成 SQL 的执行计划
+- `confirm_write` 在 NL 模式下没有作用
+- 响应中的 `nl_meta.assumptions` 记录了模型对模糊口径的取舍，建议人工复核
+- 生成失败或修复轮数耗尽时返回 `NL_GENERATE_FAILED` / `NL_REPAIR_EXHAUSTED`
+
+### auto 模式
+
+- 路由结果不会单独返回；可通过响应中的 `sql` 字段查看最终执行的 SQL
+- 需要稳定行为的生产集成建议显式指定 `mode`
+
+## 示例
+
+```bash
+# SQL + JSON
+curl -s -X POST $API/v1/query \
+  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"input":"SELECT * FROM purchases","mode":"sql","max_rows":5}'
+
+# SQL + markdown
+curl -s -X POST $API/v1/query \
+  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"input":"SELECT * FROM purchases","mode":"sql","output":"markdown","max_rows":5}'
+
+# NL
+curl -s -X POST $API/v1/query \
+  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"input":"真人用户最近一周的购买次数","mode":"nl","datasource":"blindbox"}'
+```
+
+SQL 被拦截或改写时会发生什么，见 [SQL 安全策略](/guide/sql-policy)；NL 的生成、剪枝与修复细节见 [NL2SQL 工作原理](/guide/nl2sql)。

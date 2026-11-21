@@ -1,0 +1,140 @@
+# NL2SQL 工作原理
+
+自然语言模式（`mode=nl`）把问题翻译成一条只读 SQL，并在失败时自动修复。整个链路由 `NL2SQLService`（生成）和 `QueryEngine`（执行与修复循环）协作完成。
+
+## 处理流程
+
+```text
+问题
+ │
+ ├─ 1. few-shot 选择（字符 2-gram 相似度，取 top-N）
+ ├─ 2. schema 剪枝（按问题相关性选表，FK 邻接扩展）
+ ├─ 3. 提示词组装（术语表 + 表结构 + 示例 + 问题）
+ ├─ 4. qoder CLI 生成 JSON（sql / assumptions / confidence）
+ ├─ 5. 只读静态校验（SQLPolicy.static_validate）
+ ├─ 6. 执行
+ └─ 7. 失败且可修复 → 回传报错，回到第 4 步（最多 N 轮）
+```
+
+## 提示词结构
+
+**System 消息**固定约束模型：
+
+- PostgreSQL 16 方言
+- 只能使用提供的表和列，禁止编造
+- 只能生成一条只读 SELECT
+- 必须带 LIMIT（默认 `max_rows`，不超过 `hard_max_rows`）
+- 只输出 JSON：`{"sql": "...", "assumptions": [...], "confidence": 0.0-1.0}`
+
+**User 消息**由四段组成：
+
+1. 【业务术语表】来自 `glossary.yaml`，按数据源注入
+2. 【可用表结构】剪枝后的表/列/类型/注释/PK/FK/行数估算
+3. 【参考示例】按相似度选出的 few-shot 问题 → SQL
+4. 【用户问题】原始输入
+
+模板位于 `nl2sql_proxy/core/prompts.py`，独立于业务代码，便于单独调优。
+
+## Schema 剪枝
+
+表总数不超过 `nl2sql.top_k_tables`（默认 12）时，全部表进入提示词。超过时：
+
+1. 对表名、表注释、列名、列注释做字符级 2-gram
+2. 与问题的 2-gram 求交集，按重合度排序
+3. 取前 `top_k_tables` 张表
+4. **外键邻接扩展**：已选表直接引用的表补进来，最多超出 2 张
+5. 如果所有表得分都是 0，回退为全量表，宁可多不可漏
+
+few-shot 样例中引用、但剪枝未选中的表也会被补入（最多补 4 张，表总数较多时提前停止），保证示例中的表对模型可见。
+
+## few-shot 选择
+
+`fewshots.yaml` 按数据源分组。样例数超过 `fewshot_count`（默认 3）时，用“问题 + 口径说明”的 2-gram 与当前问题计算相似度，取最相近的几条。
+
+样例的 `note` 字段会一起注入，用来强化口径，例如“按日盒数直接取汇总视图”。
+
+## 提示词超长降级
+
+若组装后的 prompt 超过 `llm.max_prompt_chars - 4000`（预留 JSON 输出余量）：
+
+1. 表数量减半（最少保留 4 张），同时去掉 all few-shot
+2. 仍超限则返回 `NL_GENERATE_FAILED`
+
+修复轮次的上下文也计入长度预算。
+
+## 生成与解析
+
+- 通过本机 qoder CLI 调用 `DeepSeek-Flash`，每次生成 spawn 一个子进程
+- `llm.concurrency` 限制并发子进程数；`llm.timeout_seconds` 控制单次超时
+- 超时或非零退出会重试 1 次
+- 输出先清洗 ANSI 控制字符，再提取 JSON：优先代码围栏，其次按括号深度扫描平衡对象，最后容忍尾逗号
+- 输出无法解析为 JSON 时重新生成 1 次，仍失败返回 `NL_GENERATE_FAILED`
+
+## 校验与修复循环
+
+生成结果先经过 `SQLPolicy.static_validate()`：
+
+- 必须是单条 SELECT
+- 不能包含任何写操作（含可写 CTE、DDL）
+- 不能使用黑名单函数、行锁等
+
+静态校验失败会消耗修复轮次。执行阶段的数据库错误只有**可修复错误**才会触发修复：
+
+| SQLSTATE | 含义 |
+| --- | --- |
+| `42601` | 语法错误 |
+| `42P01` | 表不存在 |
+| `42703` | 列不存在 |
+| `42804` | 数据类型不匹配 |
+| `42883` | 函数不存在 |
+| `42846` | 类型转换失败 |
+| `42602` | 标识符非法 |
+
+修复流程：
+
+1. 把上一次的 SQL 与报错（截断后）追加到提示词
+2. 要求模型只修正 SQL，并说明修正内容
+3. 重新静态校验、执行
+4. 最多 `nl2sql.max_repair_attempts` 轮（默认 2）
+
+修复预算耗尽仍失败 → `NL_REPAIR_EXHAUSTED`；非可修复的数据库错误（如权限不足、超时）→ 直接返回 `DB_ERROR` / `DB_TIMEOUT`。
+
+## 响应中的 NL 元信息
+
+```json
+{
+  "success": true,
+  "sql": "SELECT ...",
+  "nl_meta": {
+    "assumptions": ["“最近7天”指含今天在内的 7 个自然日"],
+    "confidence": 0.86,
+    "repair_count": 1
+  }
+}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `assumptions` | 模型对模糊口径的假设，建议人工复核 |
+| `confidence` | 模型自评置信度（0–1），仅供参考 |
+| `repair_count` | 本次请求实际修复的轮数 |
+
+> 即便 `success=true`，也建议检查 `assumptions`。业务口径的最终正确性由使用者负责。
+
+## 已知限制
+
+- 只支持 PostgreSQL 方言，且只生成单条只读 SELECT
+- 问题涉及的表不在剪枝结果中时，容易生成错误 SQL；可通过 few-shot、术语表或提高 `top_k_tables` 改善
+- 复杂多跳 JOIN、窗口函数、历史口径类问题可能需要补充示例
+- 模型不会反问；模糊之处会自行取舍并写入 `assumptions`
+- NL 结果不保证与人工口径一致，关键报表建议固化为 SQL 后使用 `mode=sql`
+
+## 调优建议
+
+1. 先跑通问题，检查返回的 `sql` 与 `assumptions`
+2. 口径错误 → 补充 `glossary.yaml`
+3. 表/列选错 → 补充 `schema_overrides` 描述或提高 `top_k_tables`
+4. 写法错误 → 把正确“问题 → SQL”加入 `fewshots.yaml`
+5. 修改后重启服务生效，再回归测试
+
+具体格式见[业务语料维护](/guide/corpora)。

@@ -1,0 +1,79 @@
+# 架构与请求流程
+
+## 组件总览
+
+```text
+Client ── HTTP POST /v1/query ──► FastAPI ─┐
+Client ── MCP streamable-http /mcp ────────┤
+                                           ▼
+                                      QueryEngine
+   ┌──────────┬───────────┬────────────┬────────────┬──────────┐
+   ▼          ▼           ▼            ▼            ▼          ▼
+ PoolRegistry SQLPolicy  SchemaCache  NL2SQL      Formatter  AuditLog
+ (asyncpg×N) (sqlglot)   (pg_catalog) (qoder CLI) (md/json)  (SQLite)
+```
+
+| 组件 | 代码位置 | 职责 |
+| --- | --- | --- |
+| QueryEngine | `nl2sql_proxy/core/engine.py` | 唯一编排点：意图路由、SQL/NL 两条管线、出参组装、审计 |
+| PoolRegistry | `nl2sql_proxy/core/db.py` | 每个数据源一个 asyncpg 连接池；双层超时；结果类型转换 |
+| SQLPolicy | `nl2sql_proxy/core/policy.py` | sqlglot 语句分类、拦截规则、LIMIT 注入、RETURNING 改写 |
+| SchemaCache | `nl2sql_proxy/core/schema.py` | `pg_catalog` 内省表/列/注释/PK/FK/行数估算；TTL 缓存；NL 剪枝 |
+| NL2SQLService | `nl2sql_proxy/core/nl2sql.py` | schema 剪枝、提示词组装、few-shot 选择、生成与修复调用 |
+| 提示词模板 | `nl2sql_proxy/core/prompts.py` | system / user / repair 三段模板，独立迭代 |
+| QoderLLM | `nl2sql_proxy/llm/qoder.py` | 无头调用 qoder CLI，子进程并发控制、超时与重试 |
+| Formatter | `nl2sql_proxy/core/formatter.py` | JSON 安全类型转换、markdown 表格渲染与截断 |
+| AuditLog | `nl2sql_proxy/core/audit.py` | 审计 SQLite（WAL），密钥脱敏，留存清理 |
+| HTTP API | `nl2sql_proxy/api/routes.py` | `/v1/query`、`/v1/schema`、`/healthz` |
+| MCP Server | `nl2sql_proxy/mcp_server/server.py` | 同进程挂载四个 MCP 工具，复用 QueryEngine |
+
+## 启动顺序
+
+服务通过 FastAPI lifespan 装配依赖：
+
+1. `PoolRegistry.start()`：创建连接池，并校验**默认数据源**（配置中的第一个）可连通；失败则启动失败
+2. `AuditLog.start()`：打开 SQLite（WAL），建表，按 `retention_days` 清理历史记录
+3. 初始化 `SchemaCache`、`QoderLLM`、`NL2SQLService`、`SQLPolicy`、`QueryEngine`
+4. 如启用 MCP：创建 MCP 应用并挂载到 `mount_path`，启动会话任务组
+5. 预热默认数据源 schema（失败仅告警，首次请求会重试）
+6. 开始接受请求
+
+## SQL 模式请求流程
+
+1. 鉴权：校验 `X-API-Key` 或 `Authorization: Bearer`
+2. 解析请求：校验 `input` 长度、`max_rows`、`timeout_seconds` 等
+3. 路由数据源：`datasource` 为空时使用第一个；不存在返回 `NOT_FOUND_DATASOURCE`
+4. `SQLPolicy.analyze()`：语句分类、违规检查、LIMIT 注入 / RETURNING 改写
+5. 写门禁：写操作（含 DDL）必须有 `confirm_write=true`
+6. 如 `dry_run`：给 SQL 加 `EXPLAIN (COSTS, FORMAT JSON)` 前缀
+7. `PoolRegistry.run()`：事务内设置 `statement_timeout` 后执行
+8. 组装响应：行数据、受影响行数、markdown、耗时
+9. 审计落库（包括违规、写确认缺失、执行失败路径）
+
+## NL 模式请求流程
+
+1. 鉴权、解析、路由数据源（同 SQL 模式）
+2. `NL2SQLService.generate()`：
+   - 选择 few-shot 样例（字符 2-gram 相似度）
+   - 按问题剪枝 schema，并补入 few-shot 引用的表
+   - 组装业务术语表 + 表结构 + 参考示例 + 用户问题
+   - 调用 qoder CLI 输出 JSON（`sql` / `assumptions` / `confidence`）
+3. `SQLPolicy.static_validate()`：只读复检（单条 SELECT、函数黑名单、无写操作等）
+4. 执行 SQL
+5. 如静态校验失败，或数据库返回可修复错误（语法、表/列不存在等），把报错回传给 LLM 修复，最多 `max_repair_attempts` 轮
+6. 组装响应：`nl_meta` 带口径假设、置信度、修复轮数
+7. 审计落库
+
+## 超时与并发
+
+- **请求超时**：`timeout_seconds`（请求级，1–300 秒）
+- **服务端超时**：事务内 `SET LOCAL statement_timeout = min(请求超时, 数据源 statement_timeout_ms)`
+- **客户端兜底**：`asyncio.wait_for(timeout + 2s)`，超时后主动丢弃该连接，避免污染连接池
+- **LLM 超时**：`llm.timeout_seconds`（默认 90 秒），与数据库超时相互独立
+- **LLM 并发**：`llm.concurrency`（默认 3）限制同时运行的 qoder 子进程数
+
+## 设计约束
+
+- **单进程**：连接池、缓存、审计、信号量均为进程内状态，`uvicorn` 只应使用 1 个 worker
+- **NL 只读**：无论 `confirm_write` 如何设置，NL 模式只允许 SELECT
+- **数据库权限就是上限**：代理使用配置的数据库用户连接；SQL 策略是应用层保护，不是权限隔离

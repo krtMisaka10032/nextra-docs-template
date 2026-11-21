@@ -1,0 +1,101 @@
+# 审计日志
+
+进入 `QueryEngine` 的每次请求都会落审计（取决于 `audit.enabled`），包括成功的、策略拦截的、写确认缺失的、数据库失败的、NL 失败的请求。
+
+## 存储
+
+| 项 | 说明 |
+| --- | --- |
+| 引擎 | SQLite（`aiosqlite`） |
+| 默认路径 | `data/audit.db`（相对配置文件所在目录） |
+| 日志模式 | WAL |
+| 文件权限 | 启动时尝试设置为 `600` |
+| 写并发 | 进程内单锁串行写入 |
+| 留存 | 启动时清理早于 `retention_days` 的记录；`<= 0` 不清理 |
+
+## 表结构
+
+表名：`audit_log`
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | 自增主键 |
+| `ts` | 记录时间（`YYYY-MM-DD HH:MM:SS`，本地时间） |
+| `api_key_hint` | Key 提示符：前 4 位 + `…` + SHA-256 前 8 位 |
+| `datasource` | 数据源名称 |
+| `mode` | 请求的 `mode`（`auto` / `nl` / `sql`） |
+| `input_text` | 原始输入，最多 8000 字符 |
+| `final_sql` | 最终执行/生成的 SQL |
+| `status` | 请求结果状态 |
+| `row_count` | 返回行数 |
+| `affected_rows` | 写操作受影响行数 |
+| `duration_ms` | 耗时 |
+| `error_code` | 业务错误码；数据库错误时记录 SQLSTATE |
+| `error_message` | 错误信息，最多 2000 字符 |
+
+## status 取值
+
+| status | 含义 |
+| --- | --- |
+| `ok` | 执行成功 |
+| `policy_violation` | SQL 被策略拦截 |
+| `write_confirm_required` | 写操作缺少确认 |
+| `db_error` | 数据库执行失败 |
+| `nl_error` | NL 生成或修复失败 |
+| `error` | 兜底路径中的其他失败 |
+
+> 鉴权失败（HTTP 401）发生在进入引擎之前，**不会**写入审计表。如果需要审计登录失败，应在反向代理层记录访问日志。
+
+## 查询示例
+
+```bash
+# 最近 10 条请求
+sqlite3 data/audit.db \
+  'SELECT ts, datasource, mode, status, error_code FROM audit_log ORDER BY id DESC LIMIT 10;'
+
+# 查看某天所有失败请求
+sqlite3 data/audit.db \
+  "SELECT ts, mode, error_code, substr(error_message,1,80) FROM audit_log
+   WHERE ts LIKE '2026-11-21%' AND status NOT IN ('ok') ORDER BY id DESC;"
+
+# 按错误码统计
+sqlite3 data/audit.db \
+  'SELECT error_code, COUNT(*) FROM audit_log WHERE error_code IS NOT NULL GROUP BY 1 ORDER BY 2 DESC;'
+
+# 查看某次请求的完整 SQL
+sqlite3 data/audit.db \
+  'SELECT ts, input_text, final_sql FROM audit_log WHERE id = 123;'
+```
+
+## 典型记录
+
+```text
+ts                    api_key_hint  datasource  mode  status        error_code
+2026-11-21 23:10:01   abcd…1f2e3d4c  datav      nl    ok
+2026-11-21 23:10:15   abcd…1f2e3d4c  datav      sql   policy_violation  POLICY_UNFILTERED_WRITE
+2026-11-21 23:11:02   abcd…1f2e3d4c  blindbox  sql   ok
+2026-11-21 23:11:40   abcd…1f2e3d4c  datav      nl    nl_error      NL_REPAIR_EXHAUSTED
+```
+
+数据库失败时 `error_code` 是 SQLSTATE：
+
+```text
+2026-11-21 23:12:03   abcd…1f2e3d4c  datav  sql  db_error  42P01
+```
+
+## 运维建议
+
+- **备份**：SQLite 使用 WAL，运行中可用 `sqlite3 data/audit.db ".backup '/backup/audit.db'"` 做一致性备份
+- **容量**：审计表增长取决于请求量；可用 `retention_days` 控制，或定期归档
+- **脱敏**：`input_text` 与 `final_sql` 是原文，可能包含业务数据条件；数据库文件权限应保持 `600`
+- **关联**：`api_key_hint` 只能定位到 Key，无法区分使用同一 Key 的不同用户
+- **监控**：可定期统计 `status != 'ok'` 的比例，关注 `NL_REPAIR_EXHAUSTED` 与 `DB_TIMEOUT`
+
+## 关闭审计
+
+```yaml
+audit:
+  enabled: false
+```
+
+关闭后不打开 SQLite、不写入记录。生产环境不建议关闭。

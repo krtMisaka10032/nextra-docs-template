@@ -1,42 +1,152 @@
-# Quick Start
+# 快速上手
 
-## Create Your First Page
+以下示例假设服务已在 `127.0.0.1:8731` 启动。先准备两个变量：
 
-Create a new file at `pages/index.mdx`:
-
-```mdx
-# Welcome to My Documentation
-
-This is my first page using Nextra!
+```bash
+API=http://127.0.0.1:8731
+KEY=YOUR_KEY   # 与 config.yaml 的 api_key 一致
 ```
 
-## Add More Pages
+## 1. 健康检查
 
-Create additional pages in the `pages` directory:
+`/healthz` 不需要鉴权，适合探活：
 
-```mdx
-# About
-
-This is the about page.
+```bash
+curl -s $API/healthz
 ```
 
-## Customize Navigation
+```json
+{"status":"ok","datasources":{"datav":"ok","blindbox":"ok"}}
+```
 
-Edit `pages/_meta.js` to customize your navigation:
+## 2. 直接执行 SQL
 
-```js
-export default {
-  "index": "Introduction",
-  "about": "About"
+```bash
+curl -s -X POST $API/v1/query \
+  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{
+    "input": "SELECT * FROM blind_box_sku",
+    "mode": "sql",
+    "datasource": "datav",
+    "output": "markdown",
+    "max_rows": 3
+  }'
+```
+
+- 未写 `LIMIT` 时，策略引擎会自动追加 `LIMIT 3`（受 `max_rows` 控制）
+- `output` 为 `markdown` 时，响应中的 `markdown` 字段是一张可直接贴进对话的表格
+
+响应示例（节选）：
+
+```json
+{
+  "success": true,
+  "sql": "SELECT * FROM blind_box_sku LIMIT 3",
+  "columns": ["id", "name"],
+  "rows": [[1, "基础款"], [2, "进阶款"], [3, "稀有款"]],
+  "row_count": 3,
+  "duration_ms": 12,
+  "markdown": "| id | name |\n|---|---|\n| 1 | 基础款 |\n| 2 | 进阶款 |\n| 3 | 稀有款 |"
 }
 ```
 
-## Add Components
+## 3. 用自然语言问数
 
-You can use React components in your MDX files:
-
-```jsx
-import { Button } from 'your-components'
-
-<Button>Click me!</Button>
+```bash
+curl -s -X POST $API/v1/query \
+  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"input": "最近7天每天开了多少盒", "mode": "nl", "datasource": "datav"}'
 ```
+
+NL 模式会返回结果、最终执行的 SQL，以及模型对模糊口径的假设：
+
+```json
+{
+  "success": true,
+  "sql": "SELECT d AS 日期, boxes AS 盒数 FROM v_xindong_base_daily ORDER BY d DESC LIMIT 7",
+  "columns": ["日期", "盒数"],
+  "rows": [["2026-11-20", 1321]],
+  "row_count": 1,
+  "nl_meta": {
+    "assumptions": ["“最近7天”指含今天在内的 7 个自然日"],
+    "confidence": 0.86,
+    "repair_count": 0
+  }
+}
+```
+
+> 自然语言模式只允许生成只读 `SELECT`，不会修改数据。需要精确控制时请用 `mode: "sql"`。
+
+## 4. 执行写操作
+
+写操作必须显式确认，否则会被拒绝：
+
+```bash
+curl -s -X POST $API/v1/query \
+  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{
+    "input": "UPDATE orders SET status = '\''done'\'' WHERE id = 42",
+    "mode": "sql",
+    "confirm_write": true
+  }'
+```
+
+服务会自动为没有 `RETURNING` 的 `INSERT/UPDATE/DELETE` 追加 `RETURNING *`，并把受影响行回显在 `rows` / `affected_rows` 中。
+
+没有 `WHERE` 的 `UPDATE/DELETE` 默认拒绝，避免误伤全表。
+
+## 5. 干跑（只看执行计划）
+
+```bash
+curl -s -X POST $API/v1/query \
+  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{
+    "input": "SELECT * FROM purchases WHERE human = true",
+    "mode": "sql",
+    "dry_run": true
+  }'
+```
+
+`dry_run=true` 时任何语句都会改成 `EXPLAIN (COSTS, FORMAT JSON)` 执行，不产生实际变更。
+
+## 6. 查看表结构
+
+```bash
+# 所有表/视图（含注释、行数估算）
+curl -s "$API/v1/schema?datasource=datav" -H "X-API-Key: $KEY"
+
+# 单表详情（列、类型、主键、外键、注释）
+curl -s "$API/v1/schema/blind_box_rate?datasource=datav" -H "X-API-Key: $KEY"
+```
+
+schema 结果缓存 10 分钟；DDL 变更后可加 `refresh=1` 强制刷新：
+
+```bash
+curl -s "$API/v1/schema?datasource=datav&refresh=1" -H "X-API-Key: $KEY"
+```
+
+## 7. 让 Agent 通过 MCP 使用
+
+服务在同一端口挂载了 streamable-http MCP，四个工具：`run_sql`、`ask_db`、`list_tables`、`describe_table`。
+
+Claude Code 接入：
+
+```bash
+claude mcp add --transport http nl2sql \
+  http://127.0.0.1:8731/mcp \
+  --header "X-API-Key: $KEY"
+```
+
+接入后，Agent 查询数据库就是一次工具调用：
+
+```text
+ask_db(question="最近7天每天开了多少盒", datasource="datav")
+```
+
+更多客户端配置见 [MCP 接入](/guide/mcp)，工具参数见 [MCP 工具](/api-reference/mcp-tools)。
+
+## 下一步
+
+- 了解三种查询模式的判定规则：[查询模式](/guide/query-modes)
+- 了解哪些 SQL 会被拦截、哪些会被改写：[SQL 安全策略](/guide/sql-policy)
+- 提升自然语言问数准确率：[业务语料维护](/guide/corpora)

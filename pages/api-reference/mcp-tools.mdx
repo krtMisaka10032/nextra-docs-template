@@ -1,0 +1,126 @@
+# MCP 工具
+
+MCP 端点：`http://127.0.0.1:8731/mcp`（streamable-http，stateless）。所有工具共用与 HTTP API 相同的 `X-API-Key` 鉴权。
+
+## run_sql
+
+直接执行一条 SQL，遵守与 HTTP API 完全相同的安全策略。
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `sql` | string | 是 | — | 要执行的 SQL |
+| `datasource` | string | 否 | 第一个数据源 | 数据源名称 |
+| `max_rows` | int | 否 | `100` | 行数上限 |
+| `timeout_seconds` | number | 否 | `30` | 查询超时 |
+| `dry_run` | bool | 否 | `false` | 只执行 EXPLAIN |
+| `confirm_write` | bool | 否 | `false` | 写操作（含 DDL）必须为 `true` |
+
+- 无 LIMIT 的 SELECT 自动注入 LIMIT
+- 写操作自动追加 `RETURNING *` 并回显受影响行
+- 无 WHERE 的 UPDATE/DELETE 会被拒绝
+
+## ask_db
+
+用自然语言提问，服务生成并执行一条只读 SELECT。
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `question` | string | 是 | — | 自然语言问题，中文即可 |
+| `datasource` | string | 否 | 第一个数据源 | 数据源名称 |
+| `max_rows` | int | 否 | `100` | 行数上限 |
+| `timeout_seconds` | number | 否 | `60` | 查询超时 |
+
+- 只读：不允许写操作
+- 返回结果 + 最终 SQL + 口径假设 + 修复轮数
+- 生成失败返回 `NL_GENERATE_FAILED`；修复耗尽返回 `NL_REPAIR_EXHAUSTED`
+
+## list_tables
+
+列出数据源中所有表/视图，包含行数估算与注释。
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `datasource` | string | 否 | 第一个数据源 | 数据源名称 |
+
+返回示例：
+
+```text
+数据源 datav 共 12 张表/视图：
+- blind_box_rate（约120行，6列） —— 盲盒概率配置
+- v_xindong_base_daily（约365行，12列） —— 按日基础汇总
+```
+
+## describe_table
+
+查看单表结构：列名、类型、主键、外键、注释。
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `table` | string | 是 | — | 表名或 `schema.table` |
+| `datasource` | string | 否 | 第一个数据源 | 数据源名称 |
+
+返回 JSON 文本（与 `GET /v1/schema/{table}` 的结构一致）：
+
+```json
+{
+ "schema": "public",
+ "name": "blind_box_rate",
+ "comment": "盲盒概率配置",
+ "est_rows": 120,
+ "column_count": 6,
+ "columns": [
+  {"name": "id", "type": "integer", "nullable": false, "default": "...", "comment": null, "is_pk": true}
+ ],
+ "foreign_keys": [{"column": "sku_id", "ref_table": "blind_box_sku", "ref_column": "id"}]
+}
+```
+
+表不存在时返回提示文本，而不是协议错误。
+
+## 调用示例
+
+Python：
+
+```python
+await session.call_tool("list_tables", {"datasource": "datav"})
+await session.call_tool("describe_table", {"table": "blind_box_rate", "datasource": "datav"})
+await session.call_tool("ask_db", {"question": "最近7天每天开了多少盒", "datasource": "datav"})
+await session.call_tool("run_sql", {
+    "sql": "UPDATE orders SET status = 'done' WHERE id = 42",
+    "confirm_write": True
+})
+```
+
+Claude Code 中直接用自然语言描述即可，例如：
+
+```text
+先 list_tables 看一下 datav 库，然后用 ask_db 查询最近 7 天每天盒数
+```
+
+## 返回格式
+
+工具返回纯文本，不是 JSON。成功时包含：
+
+```text
+SQL: <最终执行的 SQL>
+
+<markdown 表格>
+
+受影响行数: <写操作时出现>
+口径假设: <NL 模式的口径说明>
+（生成过程中自动修复 N 轮）
+```
+
+失败时：
+
+```text
+失败 [ERROR_CODE]: 错误信息
+SQL: <失败时的 SQL 或 ->
+```
+
+## 注意事项
+
+- `datasource` 必须使用配置中声明的名称；名称错误时 `run_sql` / `ask_db` 返回 `NOT_FOUND_DATASOURCE`
+- 工具调用本身不会抛协议错误来表达业务失败，Agent 需要解析返回文本中的 `失败 [CODE]`
+- MCP 与 HTTP API 共享连接池、schema 缓存与审计：一次工具调用同样会落审计
+- MCP 的默认超时与 HTTP 不同：`run_sql` 30 秒，`ask_db` 60 秒

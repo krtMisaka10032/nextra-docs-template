@@ -1,0 +1,103 @@
+# 输出格式
+
+`/v1/query` 统一返回 `QueryResponse` 对象。业务错误（策略拦截、数据库报错、NL 失败）同样返回 HTTP 200，通过 `success` / `error` 区分。
+
+## 响应字段
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `success` | bool | 是否成功 |
+| `sql` | string \| null | 最终执行的 SQL（含 LIMIT 注入、RETURNING、EXPLAIN 前缀等改写） |
+| `columns` | string[] \| null | 列名，仅查询类语句有 |
+| `rows` | any[][] \| null | 行数据，已做 JSON 安全转换 |
+| `row_count` | int \| null | 返回行数（截断前） |
+| `affected_rows` | int \| null | 写操作受影响行数 |
+| `duration_ms` | int | 整个请求耗时（毫秒） |
+| `markdown` | string \| null | `output=markdown` 时的表格 |
+| `nl_meta` | object \| null | NL 模式的生成元信息 |
+| `error` | object \| null | `{code, message}` |
+
+`nl_meta` 结构：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `assumptions` | string[] | 模型对模糊口径的假设 |
+| `confidence` | number \| null | 模型自评置信度 |
+| `repair_count` | int | 自动修复轮数 |
+
+## 成功示例
+
+```json
+{
+  "success": true,
+  "sql": "SELECT id, name FROM blind_box_sku LIMIT 3",
+  "columns": ["id", "name"],
+  "rows": [[1, "基础款"], [2, "进阶款"], [3, "稀有款"]],
+  "row_count": 3,
+  "affected_rows": null,
+  "duration_ms": 12,
+  "markdown": "| id | name |\n|---|---|\n| 1 | 基础款 |\n| 2 | 进阶款 |\n| 3 | 稀有款 |",
+  "nl_meta": null,
+  "error": null
+}
+```
+
+## 失败示例
+
+```json
+{
+  "success": false,
+  "sql": "DELETE FROM t",
+  "columns": null,
+  "rows": null,
+  "row_count": null,
+  "affected_rows": null,
+  "duration_ms": 1,
+  "markdown": null,
+  "nl_meta": null,
+  "error": {
+    "code": "POLICY_UNFILTERED_WRITE",
+    "message": "UPDATE/DELETE 缺少 WHERE 条件，全表写操作默认拒绝"
+  }
+}
+```
+
+## markdown 表格规则
+
+`output=markdown` 时生成，MCP 工具固定使用该格式：
+
+| 规则 | 行为 |
+| --- | --- |
+| 行数 | 最多渲染 `max_rows` 行，超出时附加说明“结果共 N 行，仅显示前 M 行” |
+| 列数 | 最多渲染前 20 列，超出时注明总列数 |
+| 单元格长度 | 超过 `defaults.max_cell_chars`（默认 200）截断并加 `…` |
+| 换行 | 折叠为 `␤`，避免破坏表格 |
+| 管道符 | `|` 转义为 `\|` |
+| NULL | 显示为 `NULL` |
+| 控制字符 | 剥离不可见控制字符 |
+| 空结果 | 表体显示 `*(0 行)*` |
+
+## JSON 类型转换
+
+asyncpg 返回的 PostgreSQL 类型会转成 JSON 可序列化值：
+
+| PostgreSQL 类型 | 输出 |
+| --- | --- |
+| `numeric` / `Decimal` | `number`（NaN/Infinity 保留原字符串） |
+| `timestamp` | ISO 字符串，日期与时间用空格分隔 |
+| `date` / `time` | ISO 字符串 |
+| `interval` | 字符串 |
+| `uuid` | 字符串 |
+| `bytea` | `<binary N bytes>` |
+| 数组 / JSON 对象 | 递归转换 |
+
+## 行数截断的两层含义
+
+- `max_rows`：请求级上限，影响 LIMIT 注入和响应返回的行数
+- `hard_max_rows`：服务级硬上限（默认 1000），`max_rows` 超过它时会被压到该值
+
+`row_count` 表示实际取回的行数；`rows` 只包含前 `max_rows` 行（正常情况下二者一致，因为 SQL 已经带上 LIMIT）。
+
+## 耗时
+
+`duration_ms` 从进入 `QueryEngine.handle()` 开始计算，包含鉴权后的路由、策略分析、执行、格式化与 NL 生成/修复时间。数据库内部的 `duration_ms` 不会被单独返回。

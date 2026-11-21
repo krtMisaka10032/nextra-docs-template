@@ -1,0 +1,177 @@
+# HTTP API
+
+基础地址：`http://127.0.0.1:8731`（由 `server.host` / `server.port` 决定）。
+
+## 鉴权
+
+除 `/healthz` 外，所有接口都需要 API Key，支持两种传法：
+
+```http
+X-API-Key: YOUR_KEY
+```
+
+```http
+Authorization: Bearer YOUR_KEY
+```
+
+校验失败返回 HTTP 401：
+
+```json
+{"detail": "无效或缺失的 API Key（X-API-Key）"}
+```
+
+## 接口一览
+
+| 方法 | 路径 | 鉴权 | 说明 |
+| --- | --- | --- | --- |
+| POST | `/v1/query` | 是 | 执行 SQL 或自然语言查询 |
+| GET | `/v1/schema` | 是 | 列出数据源的表/视图 |
+| GET | `/v1/schema/{table}` | 是 | 查看单表结构 |
+| GET | `/healthz` | 否 | 健康检查 |
+
+## POST /v1/query
+
+### 请求体
+
+```json
+{
+  "input": "最近7天每天开了多少盒",
+  "mode": "nl",
+  "datasource": "datav",
+  "output": "json",
+  "max_rows": 100,
+  "timeout_seconds": 30,
+  "dry_run": false,
+  "confirm_write": false
+}
+```
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `input` | string | 是 | — | 1–8000 字符，SQL 或自然语言 |
+| `mode` | enum | 否 | `auto` | `auto` / `nl` / `sql` |
+| `datasource` | string | 否 | 第一个数据源 | 数据源 `name` |
+| `output` | enum | 否 | `json` | `json` / `markdown` |
+| `max_rows` | int | 否 | `100` | 1–1000 |
+| `timeout_seconds` | number | 否 | `30` | 1–300 |
+| `dry_run` | bool | 否 | `false` | 只执行 EXPLAIN |
+| `confirm_write` | bool | 否 | `false` | 写操作必须为 `true` |
+
+字段类型或范围不合法时，FastAPI 返回 HTTP 422 及校验详情。
+
+### 响应
+
+统一返回 `QueryResponse`（HTTP 200），字段说明见[输出格式](/guide/output)。
+
+- 成功：`success=true`
+- 策略/数据库/NL 错误：`success=false`，`error.code` 给出错误码
+
+### 示例
+
+```bash
+# SQL，默认 JSON 输出
+curl -s -X POST $API/v1/query \
+  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"input":"SELECT * FROM blind_box_sku","mode":"sql","max_rows":3}'
+
+# SQL，markdown 输出
+curl -s -X POST $API/v1/query \
+  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"input":"SELECT * FROM blind_box_sku","mode":"sql","output":"markdown","max_rows":3}'
+
+# 自然语言
+curl -s -X POST $API/v1/query \
+  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"input":"最近7天每天开了多少盒","mode":"nl","datasource":"datav"}'
+
+# 写操作需要确认
+curl -s -X POST $API/v1/query \
+  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"input":"UPDATE orders SET status = '\''done'\'' WHERE id = 42","mode":"sql","confirm_write":true}'
+
+# 干跑
+curl -s -X POST $API/v1/query \
+  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"input":"SELECT * FROM purchases WHERE human = true","mode":"sql","dry_run":true}'
+```
+
+## GET /v1/schema
+
+列出数据源内所有表/视图。
+
+### 查询参数
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `datasource` | 第一个数据源 | 数据源 `name` |
+| `refresh` | `0` | `1` 强制刷新缓存 |
+
+```bash
+curl -s "$API/v1/schema?datasource=datav" -H "X-API-Key: $KEY"
+curl -s "$API/v1/schema?datasource=datav&refresh=1" -H "X-API-Key: $KEY"
+```
+
+### 响应
+
+```json
+{
+  "datasource": "datav",
+  "table_count": 12,
+  "tables": [
+    {
+      "schema": "public",
+      "name": "blind_box_rate",
+      "comment": "盲盒概率配置",
+      "est_rows": 120,
+      "column_count": 6
+    }
+  ]
+}
+```
+
+数据源不存在返回 HTTP 404。
+
+## GET /v1/schema/`{table}`
+
+查看单表结构（列、类型、可空、默认值、注释、主键、外键）。
+
+| 参数 | 位置 | 说明 |
+| --- | --- | --- |
+| `table` | path | 表名或 `schema.table` |
+| `datasource` | query | 数据源 `name` |
+
+```bash
+curl -s "$API/v1/schema/blind_box_rate?datasource=datav" \
+  -H "X-API-Key: $KEY"
+```
+
+响应字段与示例见 [Schema 缓存与自助](/guide/schema)。表不存在或数据源不存在返回 HTTP 404。
+
+## GET /healthz
+
+无需鉴权，逐个探测数据源连接：
+
+```bash
+curl -s $API/healthz
+```
+
+```json
+{"status":"ok","datasources":{"datav":"ok","blindbox":"ok"}}
+```
+
+| `status` | 含义 |
+| --- | --- |
+| `ok` | 所有数据源 `SELECT 1` 成功 |
+| `degraded` | 至少一个数据源探测失败（对应值为 `down`） |
+
+## HTTP 状态码约定
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 请求已被处理；业务失败也是 200，看 `success` |
+| 401 | 缺失或无效的 API Key |
+| 404 | schema 接口的数据源/表不存在 |
+| 422 | 请求体字段校验失败（FastAPI 默认格式） |
+| 500 | 未预期异常（引擎内部会兜底为 `INTERNAL`，通常不出现） |
+
+> 集成时请先判断 HTTP 状态码，再读取响应体。业务错误不应重试；`DB_TIMEOUT` 可视情况调整超时后重试。

@@ -1,0 +1,68 @@
+# 错误码
+
+## 两类错误
+
+| 通道 | 表现 |
+| --- | --- |
+| HTTP 传输/鉴权/校验 | HTTP 401 / 404 / 422，响应体为 FastAPI 默认结构 |
+| 业务错误 | HTTP 200，响应体 `success=false`，读取 `error.code` / `error.message` |
+
+业务错误码如下。
+
+## 策略错误
+
+| 错误码 | 原因 | 处理 |
+| --- | --- | --- |
+| `POLICY_MULTIPLE_STATEMENTS` | 一次提交了多条语句 | 拆成多次请求；字符串里的分号不受影响 |
+| `POLICY_WRITE_CONFIRM_REQUIRED` | 写操作（含 DDL）未确认 | 请求加 `"confirm_write": true` |
+| `POLICY_UNFILTERED_WRITE` | UPDATE/DELETE 缺少 WHERE | 补 WHERE；确认要全表操作时需改用其他受控通道 |
+| `POLICY_FUNC_DENIED` | 使用了黑名单函数或行锁 | 移除 `pg_sleep`、`dblink`、`FOR UPDATE` 等 |
+| `POLICY_UNSUPPORTED` | 语句类型不支持：事务、SET/VACUUM/GRANT/COPY、SELECT INTO，或 NL 模式生成了写操作 | 改用单条 SELECT/INSERT/UPDATE/DELETE/DDL；NL 模式检查问题是否要求了写操作 |
+
+## 数据库错误
+
+| 错误码 | 原因 | 处理 |
+| --- | --- | --- |
+| `DB_TIMEOUT` | 查询超过 `timeout_seconds` 或数据源 `statement_timeout_ms` | 调大超时（上限 300 秒且不超过数据源上限）；优化 SQL、检查索引 |
+| `DB_ERROR` | 数据库执行错误，`message` 中附 SQLSTATE | 按报错修正 SQL、权限或连接配置 |
+
+SQL 模式下数据库错误不会触发自动修复；NL 模式下只有部分 SQLSTATE 会触发修复（见[可修复错误](/guide/nl2sql)）。
+
+## NL2SQL 错误
+
+| 错误码 | 原因 | 处理 |
+| --- | --- | --- |
+| `NL_GENERATE_FAILED` | qoder CLI 调用失败、超时、输出无法解析，或提示词过长 | 检查 `llm.cli` 是否可执行、模型配置与网络；减小问题复杂度；补充语料；查看服务日志 |
+| `NL_REPAIR_EXHAUSTED` | 静态校验失败或可修复数据库错误超过 `max_repair_attempts` | 查看响应中的 `sql` 与错误信息；补充术语表/few-shot；必要时改用 `mode=sql` 固化正确 SQL |
+
+## 请求与系统错误
+
+| 错误码 | 原因 | 处理 |
+| --- | --- | --- |
+| `NOT_FOUND_DATASOURCE` | `datasource` 不在配置中 | 使用配置里的 `name`；错误信息会列出可用数据源 |
+| `UNAUTHENTICATED` | API Key 缺失或错误（HTTP 401） | 检查 `X-API-Key` / `Authorization: Bearer`，以及 `NL2SQL_API_KEY` 覆盖 |
+| `INTERNAL` | 引擎兜底捕获的未预期异常 | 查看服务日志堆栈；属于缺陷，需反馈 |
+
+## HTTP 层错误
+
+| 状态码 | 场景 | 响应 |
+| --- | --- | --- |
+| 401 | 鉴权失败 | `{"detail": "无效或缺失的 API Key（X-API-Key）"}` |
+| 404 | schema 接口的数据源或表不存在 | `{"detail": "..."}` |
+| 422 | 请求体字段缺失/类型或范围错误 | FastAPI 校验详情数组 |
+
+## 与审计日志的对应
+
+- `error_code` 字段会记录业务错误码；数据库错误时记录的是 **SQLSTATE**（例如 `42P01`）
+- `status` 字段取值：`ok` / `policy_violation` / `write_confirm_required` / `db_error` / `nl_error` / `error`
+- 鉴权失败发生在进入引擎之前，因此 401 请求**不会**落审计
+
+详见[审计日志](/operations/audit)。
+
+## 排查建议
+
+1. 先看 `error.code`，对照上表定位类别
+2. 再看 `sql` 字段，确认实际执行/生成的语句
+3. NL 场景额外检查 `nl_meta.assumptions`
+4. 数据库错误查看 SQLSTATE 与服务日志
+5. 需要复现时保留完整请求体与响应体（注意脱敏 API Key）
